@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 import tempfile
 import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from packages.adapters.base import AdapterResult, BaseAdapter
 from packages.adapters.registry import AdapterRegistry, get_registry
@@ -66,6 +67,7 @@ class ScanPipeline:
         repo_path: Path,
         config: ScanConfig | None = None,
         project: Project | None = None,
+        scan_id: UUID | None = None,
     ) -> ScanResult:
         """
         Scan a local git repository.
@@ -74,11 +76,15 @@ class ScanPipeline:
             repo_path: Path to the repository
             config: Scan configuration
             project: Project metadata (optional)
+            scan_id: Existing scan ID to use (optional)
 
         Returns:
             ScanResult with all findings
         """
         config = config or ScanConfig()
+
+        if not repo_path.exists():
+            raise FileNotFoundError(f"Repository path does not exist: {repo_path}")
 
         # Create project if not provided
         if not project:
@@ -90,6 +96,7 @@ class ScanPipeline:
 
         # Create scan
         scan = Scan(
+            id=scan_id or uuid4(),
             project_id=project.id,
             config=config,
             status=ScanStatus.RUNNING,
@@ -100,17 +107,21 @@ class ScanPipeline:
 
         try:
             # Run scans
-            findings = await self._run_scans(repo_path, config)
+            findings, adapter_status = await self._run_scans(repo_path, config)
 
             # Finalize scan
             scan = self._finalize_scan(scan, findings)
 
             self._report_progress("Scan completed", 1.0)
+            
+            summary = self._generate_summary(scan, findings)
+            summary["adapter_status"] = adapter_status
 
             return ScanResult(
                 scan=scan,
                 findings=findings,
-                summary=self._generate_summary(scan, findings),
+                summary=summary,
+                adapter_status=adapter_status,
             )
 
         except Exception as e:
@@ -125,11 +136,87 @@ class ScanPipeline:
                 summary={"error": str(e)},
             )
 
+    async def scan_git_url(
+        self,
+        repo_url: str,
+        config: ScanConfig | None = None,
+        project: Project | None = None,
+        scan_id: UUID | None = None,
+    ) -> ScanResult:
+        """
+        Clone and scan a remote git repository.
+        """
+        # Create project if not provided
+        if not project:
+            project = Project(
+                name=repo_url.split("/")[-1].replace(".git", ""),
+                source_type="repo",
+                source_path=repo_url,
+            )
+
+        # Create scanner here just to report starting status if needed, 
+        # but we defer to scan_repo for the actual Scan object creation.
+        # However, since we want to report "Cloning...", we might want to manage it roughly here.
+        # For simplicity, we'll let scan_repo create the object, but we need to handle the temp dir.
+        
+        try:
+            logger.info(f"Cloning {repo_url} with GIT_TERMINAL_PROMPT=0")
+            self._report_progress("Cloning repository...", 0.05)
+            logger.info("Progress reported: 5%")
+        
+            # Prevent git from asking for credentials
+            env = os.environ.copy()
+            env["GIT_TERMINAL_PROMPT"] = "0"
+        
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
+                logger.info("Starting git subprocess...")
+                # Run git clone with timeout
+                process = await asyncio.create_subprocess_exec(
+                    "git", "clone", "--depth", "1", repo_url, temp_dir,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env
+                )
+                logger.info("Git subprocess started.")
+
+                # Wait for clone (max 2 minutes)
+                try:
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    raise TimeoutError("Git clone timed out (repo might be private or large)")
+
+                if process.returncode != 0:
+                     err_msg = stderr.decode()
+                     if "Authentication failed" in err_msg or "could not read Username" in err_msg:
+                         raise RuntimeError("Git authentication failed. Is the repository private?")
+                     raise RuntimeError(f"Failed to clone repository: {err_msg}")
+                
+                # Delegate to scan_repo
+                return await self.scan_repo(temp_path, config, project, scan_id)
+
+        except Exception as e:
+                 # If cloning fails, we need to return a Failed ScanResult manually 
+                 # because scan_repo wasn't called.
+                scan = Scan(
+                    id=scan_id or uuid4(),
+                    project_id=project.id,
+                    config=config or ScanConfig(),
+                    status=ScanStatus.FAILED,
+                    started_at=datetime.utcnow(),
+                    completed_at=datetime.utcnow(),
+                    error_message=str(e)
+                )
+                return ScanResult(scan=scan, findings=[], summary={"error": str(e)})
+
+
     async def scan_zip(
         self,
         zip_path: Path,
         config: ScanConfig | None = None,
         project: Project | None = None,
+        scan_id: UUID | None = None,
     ) -> ScanResult:
         """
         Scan a zip file containing source code.
@@ -138,6 +225,7 @@ class ScanPipeline:
             zip_path: Path to the zip file
             config: Scan configuration
             project: Project metadata (optional)
+            scan_id: Existing scan ID (optional)
 
         Returns:
             ScanResult with all findings
@@ -177,13 +265,14 @@ class ScanPipeline:
                 )
 
             # Run scan on extracted content
-            return await self.scan_repo(source_root, config, project)
+            return await self.scan_repo(source_root, config, project, scan_id)
 
     async def scan_url(
         self,
         url: str,
         config: ScanConfig | None = None,
         project: Project | None = None,
+        scan_id: UUID | None = None,
     ) -> ScanResult:
         """
         Scan a running web application by URL.
@@ -192,6 +281,7 @@ class ScanPipeline:
             url: URL of the web application
             config: Scan configuration
             project: Project metadata (optional)
+            scan_id: Existing scan ID (optional)
 
         Returns:
             ScanResult with all findings
@@ -215,6 +305,7 @@ class ScanPipeline:
 
         # Create scan
         scan = Scan(
+            id=scan_id or uuid4(),
             project_id=project.id,
             config=config,
             status=ScanStatus.RUNNING,
@@ -246,15 +337,33 @@ class ScanPipeline:
             # Prioritize findings
             findings = prioritize_findings(findings)
 
+            # Prepare adapter status
+            adapter_status = {
+                "zap": {
+                    "tool": "zap",
+                    "success": result.success,
+                    "duration": result.duration_seconds,
+                    "version": result.tool_version,
+                    "findings_count": len(findings),
+                    "message": result.error_message or "",
+                }
+            }
+            if not result.success:
+                 logger.warning(f"ZAP failed: {result.error_message}")
+            
             # Finalize scan
             scan = self._finalize_scan(scan, findings)
 
             self._report_progress("Web scan completed", 1.0)
+            
+            summary = self._generate_summary(scan, findings)
+            summary["adapter_status"] = adapter_status
 
             return ScanResult(
                 scan=scan,
                 findings=findings,
-                summary=self._generate_summary(scan, findings),
+                summary=summary,
+                adapter_status=adapter_status,
             )
 
         except Exception as e:
@@ -273,7 +382,7 @@ class ScanPipeline:
         self,
         target_path: Path,
         config: ScanConfig,
-    ) -> list[Finding]:
+    ) -> tuple[list[Finding], dict[str, Any]]:
         """
         Run all configured scans.
 
@@ -282,9 +391,10 @@ class ScanPipeline:
             config: Scan configuration
 
         Returns:
-            Combined list of findings
+            Tuple of (findings, adapter_status)
         """
         all_findings: list[Finding] = []
+        adapter_status: dict[str, Any] = {}
 
         # Determine which scan types to run
         scan_types = config.scan_types
@@ -300,8 +410,8 @@ class ScanPipeline:
 
         if not adapters_to_run:
             logger.warning("No scanners available")
-            return all_findings
-
+            raise RuntimeError("No scanner tools available or selected. Please check Settings to install tools.")
+            
         # Run scans concurrently
         total_adapters = len(adapters_to_run)
         tasks = []
@@ -316,17 +426,29 @@ class ScanPipeline:
         # Wait for all scans to complete
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Collect findings
+        # Collect findings and status
         for adapter, result in zip(adapters_to_run, results):
+            status = {"tool": adapter.name, "success": False, "duration": 0.0, "message": ""}
+            
             if isinstance(result, Exception):
                 logger.error(f"Adapter {adapter.name} failed: {result}")
+                status["message"] = str(result)
+                adapter_status[adapter.name] = status
                 continue
 
+            status["success"] = result.success
+            status["duration"] = result.duration_seconds
+            status["version"] = result.tool_version
+            
             if result.success:
                 all_findings.extend(result.findings)
+                status["findings_count"] = len(result.findings)
                 logger.info(f"{adapter.name}: found {len(result.findings)} issues")
             else:
                 logger.warning(f"{adapter.name} failed: {result.error_message}")
+                status["message"] = result.error_message
+            
+            adapter_status[adapter.name] = status
 
         # Deduplicate findings
         all_findings = self._deduplicate_findings(all_findings)
@@ -345,7 +467,7 @@ class ScanPipeline:
         if config.max_findings:
             all_findings = all_findings[: config.max_findings]
 
-        return all_findings
+        return all_findings, adapter_status
 
     async def _run_adapter(
         self,

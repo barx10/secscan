@@ -74,7 +74,7 @@ class SemgrepAdapter(BaseAdapter):
 
         # Build command
         cmd = [
-            "semgrep",
+            self.get_tool_path(),
             "scan",
             "--json",
             "--no-git-ignore",  # Scan everything

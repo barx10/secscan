@@ -37,14 +37,14 @@ class DBProject(Base):
     scans: Mapped[list["DBScan"]] = relationship("DBScan", back_populates="project")
 
     @property
-    def metadata(self) -> dict[str, Any]:
+    def project_metadata(self) -> dict[str, Any]:
         """Get metadata as dictionary."""
         if self.metadata_json:
             return json.loads(self.metadata_json)
         return {}
 
-    @metadata.setter
-    def metadata(self, value: dict[str, Any]) -> None:
+    @project_metadata.setter
+    def project_metadata(self, value: dict[str, Any]) -> None:
         """Set metadata from dictionary."""
         self.metadata_json = json.dumps(value) if value else None
 

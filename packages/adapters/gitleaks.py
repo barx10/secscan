@@ -67,7 +67,7 @@ class GitleaksAdapter(BaseAdapter):
 
         # Build command
         cmd = [
-            "gitleaks",
+            self.get_tool_path(),
             "detect",
             "--source",
             str(target_path),

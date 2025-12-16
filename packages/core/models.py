@@ -170,6 +170,7 @@ class Scan(BaseModel):
     info_count: int = Field(default=0)
     risk_score: float = Field(default=0.0, description="Overall risk score 0-100")
     duration_seconds: float | None = Field(None)
+    progress: float = Field(default=0.0, description="Scan progress 0.0-1.0")
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     class Config:
@@ -182,3 +183,4 @@ class ScanResult(BaseModel):
     scan: Scan
     findings: list[Finding]
     summary: dict[str, Any] = Field(default_factory=dict)
+    adapter_status: dict[str, Any] = Field(default_factory=dict)

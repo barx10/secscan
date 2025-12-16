@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import AsyncGenerator
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -66,7 +66,7 @@ class Database:
         async with self.engine.begin() as conn:
             # Enable foreign keys for SQLite
             if "sqlite" in str(self.engine.url):
-                await conn.execute("PRAGMA foreign_keys=ON")
+                await conn.execute(text("PRAGMA foreign_keys=ON"))
 
             await conn.run_sync(Base.metadata.create_all)
 

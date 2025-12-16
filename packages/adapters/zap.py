@@ -80,6 +80,7 @@ class ZapAdapter(BaseAdapter):
             "zap.sh",
             "zap-cli",
             "/zap/zap-baseline.py",  # Docker path
+            "/Applications/ZAP.app/Contents/Java/zap.sh",  # MacOS Cask path
         ]
 
         for cmd in possible_commands:
@@ -88,6 +89,53 @@ class ZapAdapter(BaseAdapter):
                 return True
 
         return False
+
+    async def get_version(self) -> str | None:
+        """Get ZAP version."""
+        if not self.zap_command:
+            return None
+
+        # Method 1: Try to parse from jar file in the same directory (Fastest/Safest)
+        try:
+            zap_path = Path(self.zap_command)
+            if zap_path.is_symlink():
+                zap_path = zap_path.resolve()
+            
+            zap_dir = zap_path.parent
+            
+            # Look for zap-x.y.z.jar
+            for file in zap_dir.glob("zap-*.jar"):
+                # matches zap-2.14.0.jar
+                name = file.stem # zap-2.14.0
+                if name.startswith("zap-") and name[4].isdigit():
+                    return name[4:] # 2.14.0
+                    
+        except Exception as e:
+            logger.debug(f"Could not parse ZAP jar version: {e}")
+
+        # Method 2: Fallback to running command
+        # ZAP uses -version, not --version
+        cmd = [self.zap_command, "-cmd", "-version"] 
+        # Added -cmd because sometimes it needs to be told it's command line mode
+        
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            output = stdout.decode().strip()
+            
+            for line in output.split("\n"):
+                if "OWASP ZAP" in line or "ZAP" in line:
+                    return line.strip()
+            
+            return output.split("\n")[0] if output else None
+            
+        except Exception as e:
+            logger.debug(f"Could not get ZAP version: {e}")
+            return None
 
     async def scan(self, target_path: Path, **kwargs: Any) -> AdapterResult:
         """

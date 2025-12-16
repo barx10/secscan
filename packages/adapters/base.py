@@ -129,7 +129,15 @@ class BaseAdapter(ABC):
         Returns:
             Tuple of (return_code, stdout, stderr)
         """
+
         logger.debug(f"Running command: {' '.join(cmd)}")
+
+        if cwd and not cwd.exists():
+            return 1, "", f"Working directory does not exist: {cwd}"
+            
+        executable = cmd[0]
+        if not shutil.which(executable) and not Path(executable).exists():
+             return 1, "", f"Executable not found: {executable}"
 
         try:
             proc = await asyncio.create_subprocess_exec(

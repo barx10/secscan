@@ -45,7 +45,7 @@ class TrivyAdapter(BaseAdapter):
 
         # Build command
         cmd = [
-            "trivy",
+            self.get_tool_path(),
             scan_type,
             "--format",
             "json",

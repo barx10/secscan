@@ -165,6 +165,67 @@ async def list_tools():
     ]
 
 
+@app.post("/tools/{name}/install")
+async def install_tool(name: str):
+    """Attempt to install a missing tool."""
+    import shutil
+    import subprocess
+    import sys
+
+    # Map tools to install commands
+    install_commands = {}
+    
+    # Python tools (install in current env)
+    if name == "semgrep":
+        install_commands[name] = [sys.executable, "-m", "pip", "install", "semgrep"]
+    
+    # Homebrew tools (Mac/Linux)
+    elif name in ["gitleaks", "trivy", "syft", "osv-scanner", "zap"]:
+        if shutil.which("brew"):
+            pkg_name = name
+            if name == "zap":
+                pkg_name = "--cask owasp-zap" # Zap is a cask
+                
+            install_commands[name] = ["brew", "install"] + pkg_name.split()
+        else:
+            raise HTTPException(status_code=400, detail="Homebrew is required to install this tool automatically.")
+    
+    else:
+        raise HTTPException(status_code=400, detail=f"Automatic installation not supported for {name}")
+
+    cmd = install_commands.get(name)
+    if not cmd:
+         raise HTTPException(status_code=400, detail=f"No install command found for {name}")
+
+    try:
+        # Run the installation
+        process = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if process.returncode != 0:
+            raise Exception(process.stderr)
+            
+        return {"status": "installed", "message": f"{name} installed successfully"}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Installation failed: {str(e)}")
+
+
+
+@app.get("/scans", response_model=list[ScanStatusResponse])
+async def list_scans():
+    """List all scans."""
+    return [
+        ScanStatusResponse(
+            scan_id=scan_id,
+            status=result.scan.status.value,
+            findings_count=result.scan.findings_count,
+            progress=result.scan.progress,
+            error_message=result.scan.error_message,
+        )
+        for scan_id, result in scan_results.items()
+    ]
+
+
 @app.post("/scans", response_model=ScanResponse)
 async def create_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     """
@@ -203,18 +264,34 @@ async def create_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     # Start background scan
     async def run_scan():
         pipeline = ScanPipeline()
+        
+        def update_progress(message: str, progress: float):
+            # Update in-memory status
+            if scan_id in scan_results:
+                scan_results[scan_id].scan.status = ScanStatus.RUNNING
+                scan_results[scan_id].scan.progress = progress
+                # We could also store the 'message' somewhere if we want to show "Cloning..."
+        
+        pipeline.set_progress_callback(update_progress)
 
         try:
             target_path = Path(request.target)
 
             if request.target_type == "url":
-                result = await pipeline.scan_url(request.target, config, project)
+                result = await pipeline.scan_url(request.target, config, project, scan_id=UUID(scan_id))
             elif request.target_type == "zip":
-                result = await pipeline.scan_zip(target_path, config, project)
+                result = await pipeline.scan_zip(target_path, config, project, scan_id=UUID(scan_id))
             else:
-                result = await pipeline.scan_repo(target_path, config, project)
+                # Check for git URL or if scanning local path
+                if request.target.startswith(('http://', 'https://', 'git@', 'ssh://')):
+                     result = await pipeline.scan_git_url(request.target, config, project, scan_id=UUID(scan_id))
+                else:
+                    result = await pipeline.scan_repo(target_path, config, project, scan_id=UUID(scan_id))
 
             scan_results[scan_id] = result
+            
+            # Inject target for reporting
+            scan_results[scan_id].summary["target"] = request.target
 
             # Store in database
             db = get_database()
@@ -400,8 +477,9 @@ async def get_json_report(scan_id: str):
 
 
 @app.get("/scans/{scan_id}/report.html", response_class=HTMLResponse)
-async def get_html_report(scan_id: str):
+async def get_html_report(scan_id: str, lang: str = "en"):
     """Get scan report as HTML page."""
+    print(f"Generating report for scan {scan_id} with lang={lang}")
     if scan_id not in scan_results:
         raise HTTPException(status_code=404, detail="Scan not found")
 
@@ -410,25 +488,35 @@ async def get_html_report(scan_id: str):
     if result.scan.status != ScanStatus.COMPLETED:
         raise HTTPException(status_code=400, detail="Scan not completed")
 
-    reporter = HtmlReporter({"project_name": f"Scan {scan_id[:8]}"})
+    # Use target URL/path if available, otherwise scan ID
+    project_name = result.summary.get("target", f"Scan {scan_id[:8]}")
+
+    reporter = HtmlReporter({
+        "project_name": project_name,
+        "language": lang
+    })
     content = reporter.generate(result)
 
     return HTMLResponse(content=content)
 
 
 @app.delete("/scans/{scan_id}")
-async def cancel_scan(scan_id: str):
-    """Cancel a running scan."""
+async def delete_scan(scan_id: str):
+    """Delete a scan from history (cancels if running)."""
     if scan_id not in scan_results:
         raise HTTPException(status_code=404, detail="Scan not found")
 
+    # Cancel if running
     if scan_id in scan_tasks:
         task = scan_tasks[scan_id]
         if not task.done():
             task.cancel()
-            scan_results[scan_id].scan.status = ScanStatus.CANCELLED
+        del scan_tasks[scan_id]
 
-    return {"message": "Scan cancelled"}
+    # Remove from results
+    del scan_results[scan_id]
+
+    return {"message": "Scan deleted"}
 
 
 # Run with: uvicorn apps.api.main:app --reload

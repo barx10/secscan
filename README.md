@@ -4,6 +4,27 @@
 
 ---
 
+### 📸 Screenshots / Skjermbilder
+
+<details>
+<summary><strong>Click to view screenshots / Klikk for å se skjermbilder</strong></summary>
+
+| Dashboard | New Scan |
+|:---------:|:--------:|
+| ![Dashboard](docs/screenshots/dashboard.png) | ![New Scan](docs/screenshots/new-scan.png) |
+
+| Scan Report | Settings |
+|:-----------:|:--------:|
+| ![Report](docs/screenshots/report.png) | ![Settings](docs/screenshots/settings.png) |
+
+| Findings | Help |
+|:--------:|:----:|
+| ![Findings](docs/screenshots/findings.png) | ![Help](docs/screenshots/help.png) |
+
+</details>
+
+---
+
 <a name="english"></a>
 ## 🇬🇧 English
 

@@ -1,0 +1,145 @@
+# SecScan Default Configuration
+# This file contains the default settings for SecScan
+
+# Scan settings
+scan:
+  # Default scan types
+  types:
+    - secrets
+    - deps
+    - sast
+    - config
+
+  # Minimum severity to include in reports
+  severity_threshold: info
+
+  # Fail CI if findings at or above this severity (null to never fail)
+  fail_on_severity: high
+
+  # Maximum scan time in seconds
+  timeout: 3600
+
+  # Maximum findings to return (null for unlimited)
+  max_findings: null
+
+  # Generate suggested patches
+  generate_patches: true
+
+  # File patterns to exclude from scanning
+  exclude:
+    - "**/node_modules/**"
+    - "**/venv/**"
+    - "**/.venv/**"
+    - "**/env/**"
+    - "**/.git/**"
+    - "**/dist/**"
+    - "**/build/**"
+    - "**/__pycache__/**"
+    - "**/*.min.js"
+    - "**/*.min.css"
+    - "**/vendor/**"
+    - "**/third_party/**"
+
+# Tool-specific configuration
+tools:
+  gitleaks:
+    # Path to custom gitleaks config (optional)
+    # config_path: .gitleaks.toml
+
+    # Path to baseline file for suppression (optional)
+    # baseline_path: .gitleaks-baseline.json
+
+  semgrep:
+    # Rulesets to use (default: auto for language detection)
+    rulesets:
+      - auto
+
+    # Additional rulesets can be added:
+    # - p/security-audit
+    # - p/owasp-top-ten
+
+    # Exclude patterns specific to semgrep
+    exclude:
+      - "**/test/**"
+      - "**/*_test.go"
+      - "**/*_test.py"
+
+  trivy:
+    # Severity levels to scan for
+    severity: "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
+
+    # Scanners to enable
+    scanners:
+      - vuln
+      - misconfig
+      - secret
+
+    # Skip database update (for offline/CI use)
+    skip_update: false
+
+  osv-scanner:
+    # No special configuration needed
+    # OSV-scanner auto-detects lockfiles
+
+  zap:
+    # Minutes to spider (for baseline scan)
+    minutes: 1
+
+    # Enable Ajax spider for JS-heavy sites
+    ajax_spider: false
+
+    # Custom rules file (optional)
+    # rules_file: .zap-rules.conf
+
+  syft:
+    # Output format for SBOM
+    format: json
+
+# Scoring configuration
+scoring:
+  # Base scores for severity levels
+  severity_scores:
+    critical: 90
+    high: 70
+    medium: 40
+    low: 20
+    info: 5
+
+  # Confidence multipliers
+  confidence_multipliers:
+    high: 1.0
+    medium: 0.8
+    low: 0.5
+
+  # High-risk patterns that boost score
+  high_risk_patterns:
+    - sql-injection
+    - xss
+    - command-injection
+    - ssrf
+    - rce
+    - auth-bypass
+    - idor
+
+# Storage configuration
+storage:
+  # Database URL (SQLite for MVP)
+  database_url: "sqlite+aiosqlite:///secscan.db"
+
+  # Future: PostgreSQL
+  # database_url: "postgresql+asyncpg://user:pass@localhost/secscan"
+
+# API configuration
+api:
+  # Host and port
+  host: "0.0.0.0"
+  port: 8000
+
+  # CORS origins (configure for production)
+  cors_origins:
+    - "*"
+
+# Logging configuration
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

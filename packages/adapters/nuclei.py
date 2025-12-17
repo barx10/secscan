@@ -75,14 +75,18 @@ class NucleiAdapter(BaseAdapter):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, _ = await proc.communicate()
+            stdout, stderr = await proc.communicate()
+            # Nuclei writes version info to stdout
             output = stdout.decode().strip()
             
-            # Output format: "Nuclei v3.1.0"
-            if "Nuclei" in output:
-                return output.split()[-1].lstrip('v')
+            # Output format: "[INF] Nuclei Engine Version: v3.6.1"
+            for line in output.split('\n'):
+                if "Nuclei Engine Version:" in line:
+                    # Extract version like "v3.6.1"
+                    version = line.split(":")[-1].strip().lstrip('v')
+                    return version
             
-            return output.split('\n')[0] if output else None
+            return None
             
         except Exception as e:
             logger.debug(f"Could not get Nuclei version: {e}")
@@ -282,3 +286,25 @@ class NucleiAdapter(BaseAdapter):
             logger.error(f"Error parsing Nuclei result: {e}")
             logger.debug(f"Result: {result}")
             return None
+
+    def parse_output(self, raw_output: dict[str, Any]) -> list[Finding]:
+        """
+        Parse raw Nuclei output into findings.
+        
+        Args:
+            raw_output: Raw output from Nuclei (dict with results list)
+            
+        Returns:
+            List of Finding objects
+        """
+        findings = []
+        
+        # Handle both single result dict and list of results
+        results = raw_output if isinstance(raw_output, list) else raw_output.get("results", [])
+        
+        for result in results:
+            finding = self._parse_nuclei_result(result, result.get("matched-at", ""))
+            if finding:
+                findings.append(finding)
+        
+        return findings

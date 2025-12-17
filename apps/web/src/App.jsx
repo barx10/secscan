@@ -276,7 +276,7 @@ const ActivityLog = () => {
 
 const FindingsPage = () => {
   const [scans, setScans] = useState([]);
-  const { t } = useLanguage();
+  const { t, language } = useLanguage();
 
   useEffect(() => {
     api.getScans().then(data => {
@@ -306,7 +306,7 @@ const FindingsPage = () => {
                 {t('findings')}
               </div>
               <a
-                href={`/api/scans/${scan.scan_id}/report.html`}
+                href={`/api/scans/${scan.scan_id}/report.html?lang=${language}`}
                 target="_blank"
                 style={{
                   display: 'inline-flex',
@@ -329,7 +329,7 @@ const FindingsPage = () => {
 
 const ReportsPage = () => {
   const [scans, setScans] = useState([]);
-  const { t } = useLanguage();
+  const { t, language } = useLanguage();
 
   useEffect(() => {
     api.getScans().then(data => {
@@ -372,7 +372,7 @@ const ReportsPage = () => {
                     <Download size={14} /> JSON
                   </a>
                   <a
-                    href={`/api/scans/${scan.scan_id}/report.html`}
+                    href={`/api/scans/${scan.scan_id}/report.html?lang=${language}`}
                     target="_blank"
                     style={{
                       display: 'flex',

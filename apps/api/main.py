@@ -179,14 +179,23 @@ async def install_tool(name: str):
     if name == "semgrep":
         install_commands[name] = [sys.executable, "-m", "pip", "install", "semgrep"]
     
+    # Go tools
+    elif name == "nuclei":
+        if shutil.which("go"):
+            install_commands[name] = [
+                "go", "install", "-v", 
+                "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"
+            ]
+        else:
+            raise HTTPException(
+                status_code=400, 
+                detail="Go is required to install Nuclei. Install Go from https://go.dev/dl/"
+            )
+    
     # Homebrew tools (Mac/Linux)
-    elif name in ["gitleaks", "trivy", "syft", "osv-scanner", "zap"]:
+    elif name in ["gitleaks", "trivy", "syft", "osv-scanner"]:
         if shutil.which("brew"):
-            pkg_name = name
-            if name == "zap":
-                pkg_name = "--cask owasp-zap" # Zap is a cask
-                
-            install_commands[name] = ["brew", "install"] + pkg_name.split()
+            install_commands[name] = ["brew", "install", name]
         else:
             raise HTTPException(status_code=400, detail="Homebrew is required to install this tool automatically.")
     

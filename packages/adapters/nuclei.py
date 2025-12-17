@@ -51,6 +51,16 @@ class NucleiAdapter(BaseAdapter):
         """Get supported scan types."""
         return [ScanType.WEB]
 
+    @property
+    def tool_name(self) -> str:
+        """Get tool display name."""
+        return "Nuclei"
+
+    @property
+    def required_binaries(self) -> list[str]:
+        """Get required binary names."""
+        return ["nuclei"]
+
     def is_available(self) -> bool:
         """Check if Nuclei is installed."""
         return shutil.which(self.nuclei_command) is not None

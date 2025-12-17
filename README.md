@@ -36,7 +36,7 @@ Security vulnerability scanner for applications and AI-constructed websites.
 - **Dependency Scanning**: Find vulnerable dependencies using osv-scanner and trivy
 - **SAST**: Static analysis with semgrep for code vulnerabilities
 - **Config Scanning**: Detect misconfigurations in Dockerfiles, Kubernetes manifests, Terraform, etc.
-- **Web Scanning**: Baseline web application security scanning with OWASP ZAP
+- **Web Scanning**: Fast web application security scanning with Nuclei
 - **SBOM Generation**: Generate Software Bill of Materials with syft
 
 ### Quick Start
@@ -131,7 +131,7 @@ Install the scanner tools:
 | trivy | `brew install trivy` |
 | osv-scanner | `brew install osv-scanner` |
 | syft | `brew install syft` |
-| ZAP | `brew install --cask owasp-zap` |
+| Nuclei | `go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest` |
 
 **Windows (Scoop):**
 
@@ -139,7 +139,7 @@ Install the scanner tools:
 # Install Scoop first: https://scoop.sh
 scoop install gitleaks trivy osv-scanner syft
 pip install semgrep
-# ZAP: Download from https://www.zaproxy.org/download/
+# Nuclei: go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
 ```
 
 ### Exit Codes
@@ -163,7 +163,7 @@ Sikkerhetsscanner for applikasjoner og AI-genererte nettsider.
 - **Avhengighetsscanning**: Finner sårbare biblioteker med osv-scanner og trivy
 - **SAST (Kodeanalyse)**: Statisk analyse med semgrep for kodesårbarheter
 - **Konfigurasjonsscanning**: Oppdager feilkonfigurasjon i Dockerfiler, Kubernetes, Terraform, osv.
-- **Nettsidesanning**: Baselinje-skanning av webapplikasjoner med OWASP ZAP
+- **Nettsidesanning**: Rask skanning av webapplikasjoner med Nuclei
 - **SBOM-generering**: Genererer Software Bill of Materials med syft
 
 ### Kom i gang
@@ -258,7 +258,7 @@ Installer skannerverktøyene:
 | trivy | `brew install trivy` |
 | osv-scanner | `brew install osv-scanner` |
 | syft | `brew install syft` |
-| ZAP | `brew install --cask owasp-zap` |
+| Nuclei | `go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest` |
 
 **Windows (Scoop):**
 
@@ -266,7 +266,7 @@ Installer skannerverktøyene:
 # Installer Scoop først: https://scoop.sh
 scoop install gitleaks trivy osv-scanner syft
 pip install semgrep
-# ZAP: Last ned fra https://www.zaproxy.org/download/
+# Nuclei: go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
 ```
 
 ### Avslutningskoder

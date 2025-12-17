@@ -197,7 +197,7 @@ const translations = {
         sourceType: "Kildetype",
         repository: "Git-depot",
         website: "Nettside-URL",
-        scanWeb: "Nettsidesikkerhet (OWASP ZAP)",
+        scanWeb: "Nettsidesikkerhet (Nuclei)",
     }
 };
 

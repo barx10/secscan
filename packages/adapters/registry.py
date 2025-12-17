@@ -11,7 +11,7 @@ from packages.adapters.osv import OsvScannerAdapter
 from packages.adapters.semgrep import SemgrepAdapter
 from packages.adapters.syft import SyftAdapter
 from packages.adapters.trivy import TrivyAdapter
-from packages.adapters.zap import ZapAdapter
+from packages.adapters.nuclei import NucleiAdapter
 from packages.core.models import ScanType
 
 if TYPE_CHECKING:
@@ -33,7 +33,7 @@ class AdapterRegistry:
         SemgrepAdapter,
         TrivyAdapter,
         OsvScannerAdapter,
-        ZapAdapter,
+        NucleiAdapter,
         SyftAdapter,
     ]
 

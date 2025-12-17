@@ -315,11 +315,11 @@ class ScanPipeline:
         self._report_progress("Starting web scan", 0.0)
 
         try:
-            # Get ZAP adapter
-            zap = self.registry.get("zap")
-            if not zap or not zap.is_available():
+            # Get Nuclei adapter
+            nuclei = self.registry.get("nuclei")
+            if not nuclei or not nuclei.is_available():
                 scan.status = ScanStatus.FAILED
-                scan.error_message = "ZAP is not available for web scanning"
+                scan.error_message = "Nuclei is not available for web scanning"
                 scan.completed_at = datetime.utcnow()
                 return ScanResult(
                     scan=scan,
@@ -327,10 +327,10 @@ class ScanPipeline:
                     summary={"error": scan.error_message},
                 )
 
-            self._report_progress("Running ZAP baseline scan", 0.1)
+            self._report_progress("Running Nuclei scan", 0.1)
 
-            # Run ZAP scan
-            result = await zap.scan(Path(url), url=url, timeout=config.timeout_seconds)
+            # Run Nuclei scan
+            result = await nuclei.scan(Path(url), url=url, timeout=config.timeout_seconds)
 
             findings = result.findings if result.success else []
 
@@ -339,8 +339,8 @@ class ScanPipeline:
 
             # Prepare adapter status
             adapter_status = {
-                "zap": {
-                    "tool": "zap",
+                "nuclei": {
+                    "tool": "nuclei",
                     "success": result.success,
                     "duration": result.duration_seconds,
                     "version": result.tool_version,

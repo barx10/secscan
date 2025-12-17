@@ -88,12 +88,23 @@ secscan scan https://example.com -t web
 
 Start the web interface:
 
+**macOS/Linux:**
 ```bash
 # Start the API backend
 uvicorn apps.api.main:app --port 8080 &
 
 # Start the frontend dev server
 cd apps/web && npm run dev
+```
+
+**Windows (run in two separate terminals):**
+```powershell
+# Terminal 1: Start the API backend
+uvicorn apps.api.main:app --port 8080
+
+# Terminal 2: Start the frontend dev server
+cd apps/web
+npm run dev
 ```
 
 Open http://localhost:5173 in your browser.
@@ -111,14 +122,25 @@ Open http://localhost:5173 in your browser.
 
 Install the scanner tools:
 
+**macOS/Linux (Homebrew):**
+
 | Tool | Installation |
 |------|-------------|
 | gitleaks | `brew install gitleaks` |
 | semgrep | `pip install semgrep` |
 | trivy | `brew install trivy` |
-| osv-scanner | `go install github.com/google/osv-scanner/cmd/osv-scanner@latest` |
+| osv-scanner | `brew install osv-scanner` |
 | syft | `brew install syft` |
 | ZAP | `brew install --cask owasp-zap` |
+
+**Windows (Scoop):**
+
+```powershell
+# Install Scoop first: https://scoop.sh
+scoop install gitleaks trivy osv-scanner syft
+pip install semgrep
+# ZAP: Download from https://www.zaproxy.org/download/
+```
 
 ### Exit Codes
 
@@ -193,12 +215,23 @@ secscan scan https://eksempel.no -t web
 
 Start webgrensesnittet:
 
+**macOS/Linux:**
 ```bash
 # Start API-backend
 uvicorn apps.api.main:app --port 8080 &
 
 # Start frontend-utviklingsserver
 cd apps/web && npm run dev
+```
+
+**Windows (kjør i to separate terminaler):**
+```powershell
+# Terminal 1: Start API-backend
+uvicorn apps.api.main:app --port 8080
+
+# Terminal 2: Start frontend-utviklingsserver
+cd apps/web
+npm run dev
 ```
 
 Åpne http://localhost:5173 i nettleseren.
@@ -216,14 +249,25 @@ cd apps/web && npm run dev
 
 Installer skannerverktøyene:
 
+**macOS/Linux (Homebrew):**
+
 | Verktøy | Installasjon |
 |---------|--------------|
 | gitleaks | `brew install gitleaks` |
 | semgrep | `pip install semgrep` |
 | trivy | `brew install trivy` |
-| osv-scanner | `go install github.com/google/osv-scanner/cmd/osv-scanner@latest` |
+| osv-scanner | `brew install osv-scanner` |
 | syft | `brew install syft` |
 | ZAP | `brew install --cask owasp-zap` |
+
+**Windows (Scoop):**
+
+```powershell
+# Installer Scoop først: https://scoop.sh
+scoop install gitleaks trivy osv-scanner syft
+pip install semgrep
+# ZAP: Last ned fra https://www.zaproxy.org/download/
+```
 
 ### Avslutningskoder
 
@@ -232,6 +276,54 @@ Installer skannerverktøyene:
 | 0 | Ingen problemer over terskel |
 | 1 | Problemer funnet over feilterskel |
 | 2 | Skanningen feilet |
+
+---
+
+## 🔒 Security Notice / Sikkerhetsvarsel
+
+**🇬🇧 English:**
+
+**⚠️ WARNING: This tool is designed for LOCAL USE ONLY**
+
+SecScan analyzes source code and discovers vulnerabilities, which makes it a sensitive security tool. **Do not deploy this as a public web service** without proper security measures.
+
+**Why?**
+- Users upload source code containing secrets, credentials, and proprietary information
+- Vulnerability reports contain sensitive security information
+- The tool becomes an attractive target for attackers
+- GDPR, NDA, and compliance requirements
+
+**Recommended Usage:**
+- ✅ **Local development** - Run on your own machine
+- ✅ **CI/CD pipelines** - GitHub Actions, GitLab CI (isolated environments)
+- ✅ **On-premise deployment** - Internal company servers with access control
+- ⚠️ **Self-hosted** - Only with strict authentication, encryption, and network isolation
+- ❌ **Public cloud hosting** - Not recommended without comprehensive security hardening
+
+The web interface is provided for convenience in **secure, trusted environments only**.
+
+---
+
+**🇳🇴 Norsk:**
+
+**⚠️ ADVARSEL: Dette verktøyet er designet for LOKAL BRUK**
+
+SecScan analyserer kildekode og oppdager sårbarheter, noe som gjør det til et sensitivt sikkerhetsverktøy. **Ikke deploy dette som en offentlig nettjeneste** uten grundige sikkerhetstiltak.
+
+**Hvorfor?**
+- Brukere laster opp kildekode som inneholder hemmeligheter, passord og proprietær informasjon
+- Sårbarhetsrapporter inneholder sensitiv sikkerhetsinformasjon
+- Verktøyet blir et attraktivt mål for angripere
+- GDPR, NDA og compliance-krav
+
+**Anbefalt bruk:**
+- ✅ **Lokal utvikling** - Kjør på din egen maskin
+- ✅ **CI/CD pipelines** - GitHub Actions, GitLab CI (isolerte miljøer)
+- ✅ **On-premise deployment** - Interne bedriftsservere med tilgangskontroll
+- ⚠️ **Self-hosted** - Kun med streng autentisering, kryptering og nettverksisolering
+- ❌ **Offentlig cloud-hosting** - Ikke anbefalt uten omfattende sikkerhetstiltak
+
+Webgrensesnittet er laget for bekvemmelighet i **sikre, betrodde miljøer kun**.
 
 ---
 

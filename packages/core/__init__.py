@@ -16,7 +16,9 @@ from packages.core.models import (
 )
 from packages.core.scoring import calculate_risk_score, prioritize_findings
 from packages.core.config import Settings, get_settings, load_config
-from packages.core.pipeline import ScanPipeline
+
+# Note: ScanPipeline is not imported here to avoid circular imports
+# Import it directly: from packages.core.pipeline import ScanPipeline
 
 __all__ = [
     "Evidence",
@@ -36,5 +38,4 @@ __all__ = [
     "Settings",
     "get_settings",
     "load_config",
-    "ScanPipeline",
 ]

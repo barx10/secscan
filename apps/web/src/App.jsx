@@ -357,7 +357,7 @@ const ReportsPage = () => {
                 <td style={{ padding: '16px' }}>{scan.findings_count}</td>
                 <td style={{ padding: '16px', display: 'flex', gap: '12px' }}>
                   <a
-                    href={`/api/scans/${scan.scan_id}/report.json`}
+                    href={`/api/scans/${scan.scan_id}/report.json?lang=${language}`}
                     style={{
                       display: 'flex',
                       alignItems: 'center',

@@ -7,7 +7,11 @@ from typing import Any
 
 from packages.core.models import Finding, ScanResult
 from packages.reporter.base import BaseReporter, ReportFormat
-from packages.reporter.knowledge_base import KnowledgeBase
+from packages.reporter.localization import (
+    get_localized_finding_content,
+    localize_tool_message,
+    normalize_language,
+)
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="{lang}">
@@ -451,6 +455,14 @@ TRANSLATIONS = {
         "label_tool": "Tool",
         "file": "File",
         "lines": "Lines",
+        "severity_critical": "critical",
+        "severity_high": "high",
+        "severity_medium": "medium",
+        "severity_low": "low",
+        "severity_info": "info",
+        "no_issues": "0 issues",
+        "na": "N/A",
+        "no_details": "No details available",
     },
     "no": {
         "report_title": "SecScan Rapport",
@@ -475,6 +487,14 @@ TRANSLATIONS = {
         "label_tool": "Verktøy",
         "file": "Fil",
         "lines": "Linjer",
+        "severity_critical": "kritisk",
+        "severity_high": "høy",
+        "severity_medium": "medium",
+        "severity_low": "lav",
+        "severity_info": "info",
+        "no_issues": "0 funn",
+        "na": "Ikke oppgitt",
+        "no_details": "Ingen detaljer tilgjengelig",
     }
 }
 
@@ -489,16 +509,14 @@ class HtmlReporter(BaseReporter):
         findings = result.findings
         
         # Get language
-        lang = self.config.get("language", "en")
-        if lang not in TRANSLATIONS:
-            lang = "en"
+        lang = normalize_language(self.config.get("language", "en"))
         t = TRANSLATIONS[lang]
 
         # Generate severity badges
-        severity_badges = self._generate_severity_badges(scan)
+        severity_badges = self._generate_severity_badges(scan, t)
 
         # Generate tool status HTML
-        tool_status_html = self._generate_tool_status_html(result.adapter_status)
+        tool_status_html = self._generate_tool_status_html(result.adapter_status, t, lang)
 
         # Generate findings HTML
         if findings:
@@ -551,7 +569,7 @@ class HtmlReporter(BaseReporter):
             **t  # Unpack translations
         )
 
-    def _generate_severity_badges(self, scan: Any) -> str:
+    def _generate_severity_badges(self, scan: Any, t: dict[str, str]) -> str:
         """Generate severity count badges."""
         badges = []
         counts = [
@@ -564,16 +582,17 @@ class HtmlReporter(BaseReporter):
 
         for severity, count in counts:
             if count > 0:
+                label = t.get(f"severity_{severity}", severity)
                 badges.append(
-                    f'<span class="severity-badge {severity}">{count} {severity}</span>'
+                    f'<span class="severity-badge {severity}">{count} {label}</span>'
                 )
 
-        return " ".join(badges) if badges else '<span class="severity-badge info">0 issues</span>'
+        return " ".join(badges) if badges else f'<span class="severity-badge info">{t["no_issues"]}</span>'
 
-    def _generate_tool_status_html(self, adapter_status: dict[str, Any] | None) -> str:
+    def _generate_tool_status_html(self, adapter_status: dict[str, Any] | None, t: dict[str, str], lang: str) -> str:
         """Generate HTML for tool status."""
         if not adapter_status:
-            return '<div class="tool-status-item"><span class="tool-meta">No details available</span></div>'
+            return f'<div class="tool-status-item"><span class="tool-meta">{t["no_details"]}</span></div>'
             
         html = []
         for name, status in adapter_status.items():
@@ -581,6 +600,7 @@ class HtmlReporter(BaseReporter):
             css_class = "success" if success else "failed"
             duration = status.get("duration", 0)
             msg = status.get("message", "")
+            msg = localize_tool_message(msg, lang)
             if duration < 0.1:
                 dur_str = "< 0.1s"
             else:
@@ -603,14 +623,12 @@ class HtmlReporter(BaseReporter):
         severity = finding.severity.value if hasattr(finding.severity, "value") else finding.severity
         category = finding.category.value if hasattr(finding.category, "value") else finding.category
 
-        # Apply KnowledgeBase overrides
-        kb = KnowledgeBase.get_content(finding, lang)
-        
-        title = kb.get("title", finding.title)
-        description = kb.get("description", finding.description)
-        impact = kb.get("impact", finding.impact)
-        recommendation = kb.get("recommendation", finding.recommendation)
-        attack_scenario = kb.get("attack_scenario", finding.attack_scenario)
+        localized = get_localized_finding_content(finding, lang)
+        title = localized["title"]
+        description = localized["description"]
+        impact = localized["impact"]
+        recommendation = localized["recommendation"]
+        attack_scenario = localized["attack_scenario"]
 
         # Evidence section
         evidence_section = ""
@@ -621,8 +639,8 @@ class HtmlReporter(BaseReporter):
                 <div class="code-block">{self._escape_html(finding.evidence.snippet)}</div>
                 <div class="evidence-info">
                     <p><strong>{t['label_tool']}:</strong> {finding.evidence.tool}</p>
-                    <p><strong>{t['file']}:</strong> {finding.evidence.file_path or 'N/A'}</p>
-                    <p><strong>{t['lines']}:</strong> {finding.evidence.line_start or 'N/A'} - {finding.evidence.line_end or 'N/A'}</p>
+                    <p><strong>{t['file']}:</strong> {finding.evidence.file_path or t['na']}</p>
+                    <p><strong>{t['lines']}:</strong> {finding.evidence.line_start or t['na']} - {finding.evidence.line_end or t['na']}</p>
                 </div>
             </div>
             """
@@ -669,7 +687,7 @@ class HtmlReporter(BaseReporter):
             severity_upper=severity.upper(),
             category=category,
             tool=finding.evidence.tool,
-            file_path=finding.evidence.file_path or "N/A",
+            file_path=finding.evidence.file_path or t["na"],
             risk_score=round(finding.risk_score, 1),
             description=self._escape_html(description),
             impact=self._escape_html(impact),
@@ -681,8 +699,10 @@ class HtmlReporter(BaseReporter):
             **t  # Unpack translations for labels
         )
 
-    def _escape_html(self, text: str) -> str:
+    def _escape_html(self, text: str | None) -> str:
         """Escape HTML special characters."""
+        if text is None:
+            return ""
         return (
             text.replace("&", "&amp;")
             .replace("<", "&lt;")

@@ -27,7 +27,7 @@ class KnowledgeBase:
         
         if "sql" in text and "injection" in text:
             return "sql_injection"
-        if "xss" in text or "cross-site scripting" in text:
+        if "xss" in text or "cross-site scripting" in text or "cross site scripting" in text:
             return "xss"
         if "secret" in text or "credential" in text or "password" in text or "key" in text or "token" in text:
             return "secrets"

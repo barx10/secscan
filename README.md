@@ -36,7 +36,7 @@ Security vulnerability scanner for applications and AI-constructed websites.
 - **Dependency Scanning**: Find vulnerable dependencies using osv-scanner and trivy
 - **SAST**: Static analysis with semgrep for code vulnerabilities
 - **Config Scanning**: Detect misconfigurations in Dockerfiles, Kubernetes manifests, Terraform, etc.
-- **Web Scanning**: Fast web application security scanning with Nuclei
+- **Web Scanning**: Fast web application security scanning with Nuclei + OWASP ZAP
 - **SBOM Generation**: Generate Software Bill of Materials with syft
 
 ### Quick Start
@@ -90,8 +90,12 @@ Start the web interface:
 
 **macOS/Linux:**
 ```bash
-# Start the API backend
-uvicorn apps.api.main:app --port 8080 &
+# Recommended: start both backend + frontend
+bash run_servers.sh
+
+# OR manually:
+# Start the API backend (port 8000)
+uvicorn apps.api.main:app --reload --host 0.0.0.0 --port 8000 &
 
 # Start the frontend dev server
 cd apps/web && npm run dev
@@ -99,8 +103,8 @@ cd apps/web && npm run dev
 
 **Windows (run in two separate terminals):**
 ```powershell
-# Terminal 1: Start the API backend
-uvicorn apps.api.main:app --port 8080
+# Terminal 1: Start the API backend (port 8000)
+uvicorn apps.api.main:app --reload --host 0.0.0.0 --port 8000
 
 # Terminal 2: Start the frontend dev server
 cd apps/web
@@ -113,8 +117,9 @@ Open http://localhost:5173 in your browser.
 
 - `POST /scans` - Create a new scan
 - `GET /scans/{scan_id}` - Get scan status
-- `GET /scans/{scan_id}/report` - Get scan report (JSON)
-- `GET /scans/{scan_id}/report.html` - Get scan report (HTML)
+- `GET /scans/{scan_id}/report?lang=en|no` - Get scan report payload in selected language
+- `GET /scans/{scan_id}/report.json?lang=en|no` - Download JSON report in selected language
+- `GET /scans/{scan_id}/report.html?lang=en|no` - Get HTML report in selected language
 - `GET /tools` - List available scanner tools
 - `POST /scans/upload` - Upload and scan a zip file
 
@@ -132,6 +137,12 @@ Install the scanner tools:
 | osv-scanner | `brew install osv-scanner` |
 | syft | `brew install syft` |
 | Nuclei | `go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest` |
+| ZAP (OWASP ZAP) | `brew install --cask owasp-zap` |
+
+Notes:
+- Web scans use both Nuclei and ZAP when available.
+- If ZAP is not installed, web scans still run with Nuclei only.
+- Frontend requires Node.js and npm.
 
 **Windows (Scoop):**
 
@@ -140,6 +151,7 @@ Install the scanner tools:
 scoop install gitleaks trivy osv-scanner syft
 pip install semgrep
 # Nuclei: go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+# ZAP: install OWASP ZAP from https://www.zaproxy.org/download/
 ```
 
 ### Exit Codes
@@ -163,7 +175,7 @@ Sikkerhetsscanner for applikasjoner og AI-genererte nettsider.
 - **Avhengighetsscanning**: Finner sårbare biblioteker med osv-scanner og trivy
 - **SAST (Kodeanalyse)**: Statisk analyse med semgrep for kodesårbarheter
 - **Konfigurasjonsscanning**: Oppdager feilkonfigurasjon i Dockerfiler, Kubernetes, Terraform, osv.
-- **Nettsidesanning**: Rask skanning av webapplikasjoner med Nuclei
+- **Nettskanning**: Rask skanning av webapplikasjoner med Nuclei + OWASP ZAP
 - **SBOM-generering**: Genererer Software Bill of Materials med syft
 
 ### Kom i gang
@@ -217,8 +229,12 @@ Start webgrensesnittet:
 
 **macOS/Linux:**
 ```bash
-# Start API-backend
-uvicorn apps.api.main:app --port 8080 &
+# Anbefalt: start både backend + frontend
+bash run_servers.sh
+
+# ELLER manuelt:
+# Start API-backend (port 8000)
+uvicorn apps.api.main:app --reload --host 0.0.0.0 --port 8000 &
 
 # Start frontend-utviklingsserver
 cd apps/web && npm run dev
@@ -226,8 +242,8 @@ cd apps/web && npm run dev
 
 **Windows (kjør i to separate terminaler):**
 ```powershell
-# Terminal 1: Start API-backend
-uvicorn apps.api.main:app --port 8080
+# Terminal 1: Start API-backend (port 8000)
+uvicorn apps.api.main:app --reload --host 0.0.0.0 --port 8000
 
 # Terminal 2: Start frontend-utviklingsserver
 cd apps/web
@@ -240,8 +256,9 @@ npm run dev
 
 - `POST /scans` - Opprett ny skanning
 - `GET /scans/{scan_id}` - Hent skannestatus
-- `GET /scans/{scan_id}/report` - Hent skannerapport (JSON)
-- `GET /scans/{scan_id}/report.html?lang=no` - Hent skannerapport på norsk (HTML)
+- `GET /scans/{scan_id}/report?lang=en|no` - Hent rapportdata på valgt språk
+- `GET /scans/{scan_id}/report.json?lang=en|no` - Last ned JSON-rapport på valgt språk
+- `GET /scans/{scan_id}/report.html?lang=en|no` - Hent HTML-rapport på valgt språk
 - `GET /tools` - List tilgjengelige skannerverktøy
 - `POST /scans/upload` - Last opp og skann en zip-fil
 
@@ -259,6 +276,12 @@ Installer skannerverktøyene:
 | osv-scanner | `brew install osv-scanner` |
 | syft | `brew install syft` |
 | Nuclei | `go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest` |
+| ZAP (OWASP ZAP) | `brew install --cask owasp-zap` |
+
+Merknader:
+- Nettskanning bruker både Nuclei og ZAP når begge er installert.
+- Hvis ZAP mangler, kjører nettskanning fortsatt med Nuclei.
+- Frontend krever Node.js og npm.
 
 **Windows (Scoop):**
 
@@ -267,6 +290,7 @@ Installer skannerverktøyene:
 scoop install gitleaks trivy osv-scanner syft
 pip install semgrep
 # Nuclei: go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+# ZAP: installer OWASP ZAP fra https://www.zaproxy.org/download/
 ```
 
 ### Avslutningskoder

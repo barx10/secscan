@@ -12,6 +12,7 @@ from packages.adapters.semgrep import SemgrepAdapter
 from packages.adapters.syft import SyftAdapter
 from packages.adapters.trivy import TrivyAdapter
 from packages.adapters.nuclei import NucleiAdapter
+from packages.adapters.zap import ZapAdapter
 from packages.core.models import ScanType
 
 if TYPE_CHECKING:
@@ -35,6 +36,7 @@ class AdapterRegistry:
         OsvScannerAdapter,
         NucleiAdapter,
         SyftAdapter,
+        ZapAdapter,
     ]
 
     def __init__(self, config: dict[str, Any] | None = None):

@@ -9,6 +9,7 @@ from uuid import UUID
 
 from packages.core.models import ScanResult
 from packages.reporter.base import BaseReporter, ReportFormat
+from packages.reporter.localization import get_localized_finding_content, normalize_language
 
 
 class CustomEncoder(json.JSONEncoder):
@@ -33,12 +34,14 @@ class JsonReporter(BaseReporter):
 
     def generate(self, result: ScanResult) -> str:
         """Generate JSON report."""
+        lang = normalize_language(self.config.get("language", "en"))
         report = {
             "version": "1.0",
+            "language": lang,
             "generated_at": datetime.utcnow().isoformat(),
             "scan": self._serialize_scan(result.scan),
             "summary": result.summary,
-            "findings": [self._serialize_finding(f) for f in result.findings],
+            "findings": [self._serialize_finding(f, lang) for f in result.findings],
         }
 
         indent = self.config.get("indent", 2)
@@ -64,16 +67,17 @@ class JsonReporter(BaseReporter):
             },
         }
 
-    def _serialize_finding(self, finding: Any) -> dict[str, Any]:
+    def _serialize_finding(self, finding: Any, lang: str) -> dict[str, Any]:
         """Serialize finding object."""
+        localized = get_localized_finding_content(finding, lang)
         return {
             "id": str(finding.id),
-            "title": finding.title,
+            "title": localized["title"],
             "severity": finding.severity.value if hasattr(finding.severity, "value") else finding.severity,
             "category": finding.category.value if hasattr(finding.category, "value") else finding.category,
             "confidence": finding.confidence.value if hasattr(finding.confidence, "value") else finding.confidence,
             "risk_score": round(finding.risk_score, 2),
-            "description": finding.description,
+            "description": localized["description"],
             "evidence": {
                 "tool": finding.evidence.tool,
                 "file_path": finding.evidence.file_path,
@@ -81,9 +85,9 @@ class JsonReporter(BaseReporter):
                 "line_end": finding.evidence.line_end,
                 "snippet": finding.evidence.snippet,
             },
-            "impact": finding.impact,
-            "attack_scenario": finding.attack_scenario,
-            "recommendation": finding.recommendation,
+            "impact": localized["impact"],
+            "attack_scenario": localized["attack_scenario"],
+            "recommendation": localized["recommendation"],
             "patch": {
                 "file_path": finding.patch.file_path,
                 "diff": finding.patch.diff,

@@ -32,6 +32,18 @@ NUCLEI_SEVERITY_MAP = {
     "critical": FindingSeverity.CRITICAL,
 }
 
+# Template IDs that are known false-positives
+FALSE_POSITIVE_TEMPLATES = {
+    "tech-detect",           # Just info about tech stack – not a vulnerability
+    "options-method",        # HTTP OPTIONS allowed – mostly informational
+}
+
+# XSS-related template patterns
+XSS_TEMPLATE_PATTERNS = [
+    "xss", "cross-site-scripting", "reflected", "stored-xss", "dom-xss",
+    "dangerouslysetinnerhtml", "innerhtml",
+]
+
 
 class NucleiAdapter(BaseAdapter):
     """Adapter for Nuclei web scanner."""
@@ -218,32 +230,49 @@ class NucleiAdapter(BaseAdapter):
             name = info.get("name", template_id)
             severity = info.get("severity", "info").lower()
             description = info.get("description", "")
-            
+
+            # Drop known false-positive templates
+            tid_lower = template_id.lower()
+            if any(fp in tid_lower for fp in FALSE_POSITIVE_TEMPLATES):
+                logger.debug(f"Suppressing false-positive template: {template_id}")
+                return None
+
+            # Drop INFO-level timestamp / cache templates (noisy, not actionable)
+            if severity == "info" and any(
+                kw in tid_lower for kw in ("timestamp", "cache-info", "cache-control")
+            ):
+                logger.debug(f"Suppressing low-value INFO template: {template_id}")
+                return None
+
             # Get matched URL and extract
             matched_at = result.get("matched-at", target_url)
             extracted = result.get("extracted-results", [])
-            
+
             # Build evidence snippet
             snippet_parts = []
             if extracted:
                 snippet_parts.append("Extracted data:")
                 snippet_parts.extend(f"  - {item}" for item in extracted[:5])
-            
+
             matcher_name = result.get("matcher-name", "")
             if matcher_name:
                 snippet_parts.append(f"Matcher: {matcher_name}")
-            
+
             snippet = "\n".join(snippet_parts) if snippet_parts else matched_at
 
-            # Map severity
-            finding_severity = NUCLEI_SEVERITY_MAP.get(
-                severity, FindingSeverity.INFO
+            # Determine if this is an XSS finding
+            tags = info.get("tags", [])
+            tags_lower = [t.lower() for t in (tags if isinstance(tags, list) else [])]
+            is_xss = any(xp in tid_lower for xp in XSS_TEMPLATE_PATTERNS) or any(
+                xp in t for xp in XSS_TEMPLATE_PATTERNS for t in tags_lower
             )
 
+            # Map severity
+            finding_severity = NUCLEI_SEVERITY_MAP.get(severity, FindingSeverity.INFO)
+
             # Determine category based on tags
-            tags = info.get("tags", [])
             category = FindingCategory.WEB
-            
+
             # Build references
             references = []
             if "reference" in info:
@@ -263,19 +292,46 @@ class NucleiAdapter(BaseAdapter):
             if not remediation:
                 remediation = f"Review and fix the vulnerability identified by template: {template_id}"
 
+            # XSS: upgrade severity + add PoC
+            xss_poc = ""
+            xss_impact = None
+            if is_xss:
+                if finding_severity < FindingSeverity.HIGH:
+                    finding_severity = FindingSeverity.HIGH
+                # Generate concrete PoC payload
+                param = ""
+                if "?" in matched_at and "=" in matched_at:
+                    param = matched_at.split("=")[-1].split("&")[0]
+                xss_poc = (
+                    f"\n\nProof-of-Concept:\n"
+                    f"  URL: {matched_at}\n"
+                    f'  Payload 1 (reflected): {param}"><script>alert(document.domain)</script>\n'
+                    f'  Payload 2 (img): {param}"><img src=x onerror=alert(1)>\n'
+                    f'  Payload 3 (SVG): {param}"><svg onload=alert(1)>\n\n'
+                    f"Verify by injecting payload into the parameter and checking if it executes in the browser."
+                )
+                xss_impact = (
+                    "Cross-Site Scripting allows attackers to execute arbitrary JavaScript in victims' browsers. "
+                    "This can lead to session hijacking, credential theft, phishing, and full account compromise."
+                )
+                if not any("owasp.org/www-community/attacks/xss" in r for r in references):
+                    references.append("https://owasp.org/www-community/attacks/xss/")
+
+            confidence = FindingConfidence.HIGH if is_xss else FindingConfidence.HIGH
+
             finding = Finding(
                 title=name,
                 severity=finding_severity,
                 category=category,
-                confidence=FindingConfidence.HIGH,  # Nuclei templates are well-tested
-                description=description or f"Nuclei template {template_id} matched",
+                confidence=confidence,
+                description=(description or f"Nuclei template {template_id} matched") + xss_poc,
                 evidence=Evidence(
                     tool="nuclei",
                     file_path=matched_at,
                     snippet=snippet,
                     raw_output=result,
                 ),
-                impact=f"Severity: {severity.upper()}. This vulnerability was detected using Nuclei template {template_id}.",
+                impact=xss_impact or f"Severity: {severity.upper()}. This vulnerability was detected using Nuclei template {template_id}.",
                 recommendation=remediation,
                 references=references,
             )

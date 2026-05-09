@@ -315,11 +315,16 @@ class ScanPipeline:
         self._report_progress("Starting web scan", 0.0)
 
         try:
-            # Get Nuclei adapter
-            nuclei = self.registry.get("nuclei")
-            if not nuclei or not nuclei.is_available():
+            # Get all available web adapters
+            web_adapters = [
+                self.registry.get("nuclei"),
+                self.registry.get("zap"),
+            ]
+            web_adapters = [a for a in web_adapters if a and a.is_available()]
+
+            if not web_adapters:
                 scan.status = ScanStatus.FAILED
-                scan.error_message = "Nuclei is not available for web scanning"
+                scan.error_message = "No web scanners available (Nuclei or ZAP required)"
                 scan.completed_at = datetime.utcnow()
                 return ScanResult(
                     scan=scan,
@@ -327,30 +332,42 @@ class ScanPipeline:
                     summary={"error": scan.error_message},
                 )
 
-            self._report_progress("Running Nuclei scan", 0.1)
+            # Run all available web scanners concurrently
+            all_findings = []
+            adapter_status = {}
 
-            # Run Nuclei scan
-            result = await nuclei.scan(Path(url), url=url, timeout=config.timeout_seconds)
+            total = len(web_adapters)
+            tasks = []
+            for i, adapter in enumerate(web_adapters):
+                self._report_progress(f"Running {adapter.name} scan", 0.1 + 0.8 * i / total)
+                tasks.append(adapter.scan(Path(url), url=url, timeout=config.timeout_seconds))
 
-            findings = result.findings if result.success else []
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Prioritize findings
-            findings = prioritize_findings(findings)
+            for adapter, result in zip(web_adapters, results):
+                if isinstance(result, Exception):
+                    logger.error(f"{adapter.name} failed: {result}")
+                    adapter_status[adapter.name] = {
+                        "tool": adapter.name, "success": False,
+                        "duration": 0.0, "message": str(result),
+                    }
+                    continue
 
-            # Prepare adapter status
-            adapter_status = {
-                "nuclei": {
-                    "tool": "nuclei",
+                adapter_status[adapter.name] = {
+                    "tool": adapter.name,
                     "success": result.success,
                     "duration": result.duration_seconds,
                     "version": result.tool_version,
-                    "findings_count": len(findings),
+                    "findings_count": len(result.findings) if result.success else 0,
                     "message": result.error_message or "",
                 }
-            }
-            if not result.success:
-                 logger.warning(f"ZAP failed: {result.error_message}")
-            
+                if result.success:
+                    all_findings.extend(result.findings)
+                else:
+                    logger.warning(f"{adapter.name} failed: {result.error_message}")
+
+            findings = prioritize_findings(all_findings)
+
             # Finalize scan
             scan = self._finalize_scan(scan, findings)
 

@@ -28,6 +28,7 @@ from packages.core.pipeline import ScanPipeline
 from packages.reporter import HtmlReporter, JsonReporter
 from packages.storage.database import get_database, init_database
 from packages.storage.repository import FindingRepository, ProjectRepository, ScanRepository
+from packages.reporter.localization import get_localized_finding_content, normalize_language
 
 # In-memory scan status storage (for MVP - use Redis in production)
 scan_results: dict[str, ScanResult] = {}
@@ -412,8 +413,9 @@ async def get_scan_status(scan_id: str):
 
 
 @app.get("/scans/{scan_id}/report", response_model=ReportResponse)
-async def get_scan_report(scan_id: str):
+async def get_scan_report(scan_id: str, lang: str = "en"):
     """Get the full scan report."""
+    selected_lang = normalize_language(lang)
     if scan_id not in scan_results:
         raise HTTPException(status_code=404, detail="Scan not found")
 
@@ -427,21 +429,21 @@ async def get_scan_report(scan_id: str):
         )
 
     findings = [
-        FindingResponse(
+        (lambda content: FindingResponse(
             id=str(f.id),
-            title=f.title,
+            title=content["title"],
             severity=f.severity.value,
             category=f.category.value,
             confidence=f.confidence.value,
             risk_score=f.risk_score,
-            description=f.description,
+            description=content["description"],
             file_path=f.evidence.file_path,
             line_start=f.evidence.line_start,
             tool=f.evidence.tool,
-            recommendation=f.recommendation,
+            recommendation=content["recommendation"],
             cwe_id=f.cwe_id,
             cve_id=f.cve_id,
-        )
+        ))(get_localized_finding_content(f, selected_lang))
         for f in result.findings
     ]
 
@@ -465,8 +467,9 @@ async def get_scan_report(scan_id: str):
 
 
 @app.get("/scans/{scan_id}/report.json")
-async def get_json_report(scan_id: str):
+async def get_json_report(scan_id: str, lang: str = "en"):
     """Get scan report as JSON file."""
+    selected_lang = normalize_language(lang)
     if scan_id not in scan_results:
         raise HTTPException(status_code=404, detail="Scan not found")
 
@@ -475,7 +478,7 @@ async def get_json_report(scan_id: str):
     if result.scan.status != ScanStatus.COMPLETED:
         raise HTTPException(status_code=400, detail="Scan not completed")
 
-    reporter = JsonReporter()
+    reporter = JsonReporter({"language": selected_lang})
     content = reporter.generate(result)
 
     return JSONResponse(
@@ -488,7 +491,8 @@ async def get_json_report(scan_id: str):
 @app.get("/scans/{scan_id}/report.html", response_class=HTMLResponse)
 async def get_html_report(scan_id: str, lang: str = "en"):
     """Get scan report as HTML page."""
-    print(f"Generating report for scan {scan_id} with lang={lang}")
+    selected_lang = normalize_language(lang)
+    print(f"Generating report for scan {scan_id} with lang={selected_lang}")
     if scan_id not in scan_results:
         raise HTTPException(status_code=404, detail="Scan not found")
 
@@ -502,7 +506,7 @@ async def get_html_report(scan_id: str, lang: str = "en"):
 
     reporter = HtmlReporter({
         "project_name": project_name,
-        "language": lang
+        "language": selected_lang
     })
     content = reporter.generate(result)
 

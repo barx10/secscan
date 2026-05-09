@@ -115,6 +115,41 @@ def calculate_risk_score(finding: Finding) -> float:
         ]
     )
 
+    # --- Score adjustments for known low-value findings ---
+
+    # Cap INFO findings related to timestamps or generic cache headers
+    if finding.severity == FindingSeverity.INFO and any(
+        kw in text_to_check for kw in ("timestamp", "cache-info", "retrieved from cache")
+    ):
+        return min(score, 2.0)
+
+    # Clickjacking: only MEDIUM if sensitive page; otherwise LOW (max 25)
+    is_clickjacking = any(
+        kw in text_to_check
+        for kw in ("clickjacking", "x-frame-options", "frame-ancestors", "x-frame")
+    )
+    if is_clickjacking:
+        has_sensitive_context = any(
+            kw in text_to_check
+            for kw in ("login", "auth", "account", "payment", "checkout", "admin", "password")
+        )
+        if not has_sensitive_context:
+            return min(score, 25.0)  # No sensitive data – cap at LOW range
+        # Sensitive page: cap at MEDIUM ceiling
+        return min(score, 50.0)
+
+    # XSS boost: if HIGH confidence and has PoC/innerHTML evidence, push toward 90
+    is_xss = any(kw in text_to_check for kw in ("cross-site scripting", "xss", "script injection"))
+    if is_xss and finding.confidence == FindingConfidence.HIGH:
+        has_concrete_evidence = any(
+            kw in text_to_check
+            for kw in ("dangerouslysetinnerhtml", "innerhtml", "proof-of-concept", "payload")
+        )
+        if has_concrete_evidence:
+            score = max(score, 85.0)
+
+    # --- Standard pattern boosts ---
+
     high_risk_matches = sum(1 for pattern in HIGH_RISK_PATTERNS if pattern in text_to_check)
     if high_risk_matches > 0:
         # Boost up to 15% for high-risk patterns

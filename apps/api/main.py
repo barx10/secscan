@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import tempfile
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -12,10 +13,11 @@ from uuid import UUID
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
 from packages.core.models import (
+    FindingCategory,
     FindingSeverity,
     Project,
     Scan,
@@ -25,6 +27,7 @@ from packages.core.models import (
     ScanType,
 )
 from packages.core.pipeline import ScanPipeline
+from packages.core.scoring import calculate_overall_risk_score
 from packages.reporter import HtmlReporter, JsonReporter
 from packages.storage.database import get_database, init_database
 from packages.storage.repository import FindingRepository, ProjectRepository, ScanRepository
@@ -33,6 +36,146 @@ from packages.reporter.localization import get_localized_finding_content, normal
 # In-memory scan status storage (for MVP - use Redis in production)
 scan_results: dict[str, ScanResult] = {}
 scan_tasks: dict[str, asyncio.Task] = {}
+logger = logging.getLogger(__name__)
+
+
+def _get_completed_result(scan_id: str) -> ScanResult:
+    if scan_id not in scan_results:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    result = scan_results[scan_id]
+    if result.scan.status != ScanStatus.COMPLETED:
+        raise HTTPException(status_code=400, detail=f"Scan not completed. Current status: {result.scan.status.value}")
+    return result
+
+
+def _make_report_title(lang: str, scope: str) -> str:
+    if scope == "gdpr":
+        return "SecScan GDPR-Rapport" if lang == "no" else "SecScan GDPR Report"
+    return "SecScan Rapport" if lang == "no" else "SecScan Report"
+
+
+def _finding_signature(finding: Any) -> str:
+    fingerprint = getattr(finding, "fingerprint", None)
+    if fingerprint:
+        return fingerprint
+    file_path = getattr(getattr(finding, "evidence", None), "file_path", "") or ""
+    tool = getattr(getattr(finding, "evidence", None), "tool", "") or ""
+    return f"{tool}|{finding.title}|{file_path}"
+
+
+def _find_previous_completed_result(target: str, exclude_scan_id: str | None = None) -> ScanResult | None:
+    candidates: list[tuple[datetime, ScanResult]] = []
+    for current_scan_id, result in scan_results.items():
+        if current_scan_id == exclude_scan_id:
+            continue
+        if result.scan.status != ScanStatus.COMPLETED:
+            continue
+        if result.summary.get("target") != target:
+            continue
+        completed_at = result.scan.completed_at or datetime.min
+        candidates.append((completed_at, result))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _warn_on_missing_findings(previous: ScanResult | None, current: ScanResult, target: str) -> None:
+    if not previous:
+        return
+
+    previous_signatures = {_finding_signature(finding): finding for finding in previous.findings}
+    current_signatures = {_finding_signature(finding) for finding in current.findings}
+    missing = [finding for signature, finding in previous_signatures.items() if signature not in current_signatures]
+    if not missing:
+        return
+
+    logger.warning(
+        "Current scan for %s is missing %s finding(s) present in the previous completed scan",
+        target,
+        len(missing),
+    )
+    for finding in missing[:10]:
+        logger.warning(
+            "Missing previous finding: tool=%s title=%s path=%s",
+            finding.evidence.tool,
+            finding.title,
+            finding.evidence.file_path,
+        )
+        title_lower = finding.title.lower()
+        if "xss" in title_lower or "cross-site scripting" in title_lower or "cross site scripting" in title_lower:
+            logger.warning("Previously seen XSS finding is missing from the latest scan: %s", finding.title)
+
+
+def _build_report_response(scan_id: str, result: ScanResult, lang: str) -> ReportResponse:
+    scan = result.scan
+    findings = [
+        (lambda content: FindingResponse(
+            id=str(f.id),
+            title=content["title"],
+            severity=f.severity.value,
+            category=f.category.value,
+            confidence=f.confidence.value,
+            risk_score=f.risk_score,
+            description=content["description"],
+            file_path=f.evidence.file_path,
+            line_start=f.evidence.line_start,
+            tool=f.evidence.tool,
+            recommendation=content["recommendation"],
+            cwe_id=f.cwe_id,
+            cve_id=f.cve_id,
+        ))(get_localized_finding_content(f, lang))
+        for f in result.findings
+    ]
+
+    return ReportResponse(
+        scan_id=scan_id,
+        status=scan.status.value,
+        started_at=scan.started_at.isoformat() if scan.started_at else None,
+        completed_at=scan.completed_at.isoformat() if scan.completed_at else None,
+        duration_seconds=scan.duration_seconds,
+        findings_count=scan.findings_count,
+        risk_score=scan.risk_score,
+        severity_counts={
+            "critical": scan.critical_count,
+            "high": scan.high_count,
+            "medium": scan.medium_count,
+            "low": scan.low_count,
+            "info": scan.info_count,
+        },
+        findings=findings,
+    )
+
+
+def _filter_scan_result(result: ScanResult, category: FindingCategory, scope: str) -> ScanResult:
+    filtered_findings = [finding for finding in result.findings if finding.category == category]
+    filtered_scan = result.scan.model_copy(deep=True)
+    filtered_scan.findings_count = len(filtered_findings)
+    filtered_scan.critical_count = sum(1 for finding in filtered_findings if finding.severity.value == "critical")
+    filtered_scan.high_count = sum(1 for finding in filtered_findings if finding.severity.value == "high")
+    filtered_scan.medium_count = sum(1 for finding in filtered_findings if finding.severity.value == "medium")
+    filtered_scan.low_count = sum(1 for finding in filtered_findings if finding.severity.value == "low")
+    filtered_scan.info_count = sum(1 for finding in filtered_findings if finding.severity.value == "info")
+    filtered_scan.risk_score = calculate_overall_risk_score(filtered_findings)
+
+    filtered_summary = dict(result.summary)
+    filtered_summary["report_scope"] = scope
+    filtered_summary["filtered_category"] = category.value
+
+    filtered_adapter_status = {
+        name: status
+        for name, status in result.adapter_status.items()
+        if name == "gdpr" or status.get("tool") == "gdpr"
+    }
+
+    return ScanResult(
+        scan=filtered_scan,
+        findings=filtered_findings,
+        summary=filtered_summary,
+        adapter_status=filtered_adapter_status,
+    )
 
 
 @asynccontextmanager
@@ -267,6 +410,7 @@ async def create_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     )
 
     scan_id = str(scan.id)
+    previous_completed_result = _find_previous_completed_result(request.target, exclude_scan_id=scan_id)
 
     # Store initial status
     scan_results[scan_id] = ScanResult(scan=scan, findings=[])
@@ -302,6 +446,7 @@ async def create_scan(request: ScanRequest, background_tasks: BackgroundTasks):
             
             # Inject target for reporting
             scan_results[scan_id].summary["target"] = request.target
+            _warn_on_missing_findings(previous_completed_result, scan_results[scan_id], request.target)
 
             # Store in database
             db = get_database()
@@ -416,53 +561,17 @@ async def get_scan_status(scan_id: str):
 async def get_scan_report(scan_id: str, lang: str = "en"):
     """Get the full scan report."""
     selected_lang = normalize_language(lang)
-    if scan_id not in scan_results:
-        raise HTTPException(status_code=404, detail="Scan not found")
+    result = _get_completed_result(scan_id)
+    return _build_report_response(scan_id, result, selected_lang)
 
-    result = scan_results[scan_id]
-    scan = result.scan
 
-    if scan.status != ScanStatus.COMPLETED:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Scan not completed. Current status: {scan.status.value}",
-        )
-
-    findings = [
-        (lambda content: FindingResponse(
-            id=str(f.id),
-            title=content["title"],
-            severity=f.severity.value,
-            category=f.category.value,
-            confidence=f.confidence.value,
-            risk_score=f.risk_score,
-            description=content["description"],
-            file_path=f.evidence.file_path,
-            line_start=f.evidence.line_start,
-            tool=f.evidence.tool,
-            recommendation=content["recommendation"],
-            cwe_id=f.cwe_id,
-            cve_id=f.cve_id,
-        ))(get_localized_finding_content(f, selected_lang))
-        for f in result.findings
-    ]
-
-    return ReportResponse(
-        scan_id=scan_id,
-        status=scan.status.value,
-        started_at=scan.started_at.isoformat() if scan.started_at else None,
-        completed_at=scan.completed_at.isoformat() if scan.completed_at else None,
-        duration_seconds=scan.duration_seconds,
-        findings_count=scan.findings_count,
-        risk_score=scan.risk_score,
-        severity_counts={
-            "critical": scan.critical_count,
-            "high": scan.high_count,
-            "medium": scan.medium_count,
-            "low": scan.low_count,
-            "info": scan.info_count,
-        },
-        findings=findings,
+@app.get("/scans/{scan_id}/gdpr-report")
+async def get_gdpr_report(scan_id: str, lang: str = "en"):
+    """Redirect legacy GDPR route to merged report GDPR section."""
+    selected_lang = normalize_language(lang)
+    return RedirectResponse(
+        url=f"/scans/{scan_id}/report.html?lang={selected_lang}#gdpr",
+        status_code=301,
     )
 
 
@@ -470,21 +579,25 @@ async def get_scan_report(scan_id: str, lang: str = "en"):
 async def get_json_report(scan_id: str, lang: str = "en"):
     """Get scan report as JSON file."""
     selected_lang = normalize_language(lang)
-    if scan_id not in scan_results:
-        raise HTTPException(status_code=404, detail="Scan not found")
+    result = _get_completed_result(scan_id)
 
-    result = scan_results[scan_id]
-
-    if result.scan.status != ScanStatus.COMPLETED:
-        raise HTTPException(status_code=400, detail="Scan not completed")
-
-    reporter = JsonReporter({"language": selected_lang})
+    reporter = JsonReporter({"language": selected_lang, "report_title": _make_report_title(selected_lang, "full")})
     content = reporter.generate(result)
 
-    return JSONResponse(
+    return Response(
         content=content,
         media_type="application/json",
         headers={"Content-Disposition": f'attachment; filename="secscan-{scan_id}.json"'},
+    )
+
+
+@app.get("/scans/{scan_id}/gdpr-report.json")
+async def get_gdpr_json_report(scan_id: str, lang: str = "en"):
+    """Redirect legacy GDPR JSON route to the merged JSON report."""
+    selected_lang = normalize_language(lang)
+    return RedirectResponse(
+        url=f"/scans/{scan_id}/report.json?lang={selected_lang}",
+        status_code=301,
     )
 
 
@@ -492,25 +605,29 @@ async def get_json_report(scan_id: str, lang: str = "en"):
 async def get_html_report(scan_id: str, lang: str = "en"):
     """Get scan report as HTML page."""
     selected_lang = normalize_language(lang)
-    print(f"Generating report for scan {scan_id} with lang={selected_lang}")
-    if scan_id not in scan_results:
-        raise HTTPException(status_code=404, detail="Scan not found")
-
-    result = scan_results[scan_id]
-
-    if result.scan.status != ScanStatus.COMPLETED:
-        raise HTTPException(status_code=400, detail="Scan not completed")
+    result = _get_completed_result(scan_id)
 
     # Use target URL/path if available, otherwise scan ID
     project_name = result.summary.get("target", f"Scan {scan_id[:8]}")
 
     reporter = HtmlReporter({
         "project_name": project_name,
-        "language": selected_lang
+        "language": selected_lang,
+        "report_title": _make_report_title(selected_lang, "full"),
     })
     content = reporter.generate(result)
 
     return HTMLResponse(content=content)
+
+
+@app.get("/scans/{scan_id}/gdpr-report.html")
+async def get_gdpr_html_report(scan_id: str, lang: str = "en"):
+    """Redirect legacy GDPR HTML route to the merged report GDPR section."""
+    selected_lang = normalize_language(lang)
+    return RedirectResponse(
+        url=f"/scans/{scan_id}/report.html?lang={selected_lang}#gdpr",
+        status_code=301,
+    )
 
 
 @app.delete("/scans/{scan_id}")

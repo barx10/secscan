@@ -35,12 +35,24 @@ class JsonReporter(BaseReporter):
     def generate(self, result: ScanResult) -> str:
         """Generate JSON report."""
         lang = normalize_language(self.config.get("language", "en"))
+        summary = dict(result.summary or {})
+        if any("byok" in finding.title.lower() for finding in result.findings):
+            summary["architecture"] = {
+                "type": "byok",
+                "label": "BYOK (Bring Your Own Key)",
+                "note": (
+                    "Ingen server-side brukerdata oppdaget"
+                    if lang == "no"
+                    else "No server-side user data detected"
+                ),
+            }
         report = {
             "version": "1.0",
             "language": lang,
+            "report_title": self.config.get("report_title", "SecScan Report"),
             "generated_at": datetime.utcnow().isoformat(),
             "scan": self._serialize_scan(result.scan),
-            "summary": result.summary,
+            "summary": summary,
             "findings": [self._serialize_finding(f, lang) for f in result.findings],
         }
 

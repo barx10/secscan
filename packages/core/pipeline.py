@@ -17,6 +17,7 @@ from packages.adapters.base import AdapterResult, BaseAdapter
 from packages.adapters.registry import AdapterRegistry, get_registry
 from packages.core.models import (
     Finding,
+    FindingSeverity,
     Project,
     Scan,
     ScanConfig,
@@ -27,6 +28,91 @@ from packages.core.models import (
 from packages.core.scoring import calculate_overall_risk_score, prioritize_findings
 
 logger = logging.getLogger(__name__)
+
+
+def _is_byok_finding(finding: Finding) -> bool:
+    title_lower = finding.title.lower()
+    return "byok" in title_lower or "api key stored in localstorage" in title_lower
+
+
+def _is_privacy_rights_finding(finding: Finding) -> bool:
+    title_lower = finding.title.lower()
+    return "manglende brukerrettigheter" in title_lower or "gdpr art. 17/20" in title_lower
+
+
+def _is_local_storage_key_finding(finding: Finding) -> bool:
+    return "api key stored in localstorage" in finding.title.lower()
+
+
+def _is_csp_missing_finding(finding: Finding) -> bool:
+    text = " ".join(
+        [
+            finding.title.lower(),
+            finding.description.lower(),
+            (finding.evidence.snippet or "").lower(),
+        ]
+    )
+    return "content security policy" in text and "header not set" in text
+
+
+def _is_privacy_contact_finding(finding: Finding) -> bool:
+    return "privacy contact information missing" in finding.title.lower()
+
+
+def _append_context_note(text: str, note: str) -> str:
+    if note.lower() in text.lower():
+        return text
+    if not text.strip():
+        return note
+    return f"{text}\n\n{note}"
+
+
+def _apply_byok_adjustments(findings: list[Finding], summary: dict[str, Any]) -> tuple[list[Finding], dict[str, Any]]:
+    byok_detected = any(_is_byok_finding(finding) for finding in findings)
+    if not byok_detected:
+        return findings, summary
+
+    adjusted_findings = [finding for finding in findings if not _is_privacy_rights_finding(finding)]
+    local_storage_exposure = any(_is_local_storage_key_finding(finding) for finding in adjusted_findings)
+
+    for finding in adjusted_findings:
+        if local_storage_exposure and _is_csp_missing_finding(finding):
+            if finding.severity in (FindingSeverity.INFO, FindingSeverity.LOW):
+                finding.severity = FindingSeverity.MEDIUM
+            finding.description = _append_context_note(
+                finding.description,
+                "BYOK context: This application appears to keep an API key in browser localStorage. Missing CSP therefore materially increases the chance that an XSS issue exposes the key, so this finding is treated as MEDIUM until CSP is hardened.",
+            )
+            finding.impact = _append_context_note(
+                finding.impact,
+                "BYOK context: Without CSP, browser-side key storage has less protection against injected scripts and the blast radius of XSS increases.",
+            )
+            finding.recommendation = _append_context_note(
+                finding.recommendation,
+                "BYOK context: Prioritize a strict CSP before other client-side hardening because it directly reduces the likelihood that an XSS path can read the stored key.",
+            )
+
+        if _is_privacy_contact_finding(finding):
+            finding.description = _append_context_note(
+                finding.description,
+                "BYOK context: Even without user accounts, privacy contact information still matters because hosting, reverse proxies, logs, crash reporting, abuse monitoring, or other third parties may process IP addresses and diagnostic metadata.",
+            )
+            finding.impact = _append_context_note(
+                finding.impact,
+                "BYOK context: Users still need a contact point for questions about metadata, logging, subprocessors, or cross-border transfers.",
+            )
+            finding.recommendation = _append_context_note(
+                finding.recommendation,
+                "BYOK context: Explain which operators or third parties can still receive operational metadata and where privacy requests should be sent.",
+            )
+
+    summary = dict(summary)
+    summary["architecture"] = {
+        "type": "byok",
+        "label": "BYOK (Bring Your Own Key)",
+        "note": "Ingen server-side brukerdata oppdaget",
+    }
+    return adjusted_findings, summary
 
 
 class ScanPipeline:
@@ -114,7 +200,11 @@ class ScanPipeline:
 
             self._report_progress("Scan completed", 1.0)
             
+            findings, summary_overrides = _apply_byok_adjustments(findings, {})
+            findings = prioritize_findings(findings)
+            scan = self._finalize_scan(scan, findings)
             summary = self._generate_summary(scan, findings)
+            summary.update(summary_overrides)
             summary["adapter_status"] = adapter_status
 
             return ScanResult(
@@ -319,6 +409,7 @@ class ScanPipeline:
             web_adapters = [
                 self.registry.get("nuclei"),
                 self.registry.get("zap"),
+                self.registry.get("gdpr"),
             ]
             web_adapters = [a for a in web_adapters if a and a.is_available()]
 
@@ -373,7 +464,11 @@ class ScanPipeline:
 
             self._report_progress("Web scan completed", 1.0)
             
+            findings, summary_overrides = _apply_byok_adjustments(findings, {})
+            findings = prioritize_findings(findings)
+            scan = self._finalize_scan(scan, findings)
             summary = self._generate_summary(scan, findings)
+            summary.update(summary_overrides)
             summary["adapter_status"] = adapter_status
 
             return ScanResult(

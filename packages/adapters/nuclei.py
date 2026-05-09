@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from packages.adapters.base import AdapterResult, BaseAdapter
+from packages.adapters.web_context import EndpointContext, analyze_urls, apply_context_to_finding
 from packages.core.models import (
     Evidence,
     Finding,
@@ -52,6 +53,7 @@ class NucleiAdapter(BaseAdapter):
         """Initialize Nuclei adapter."""
         super().__init__(config)
         self.nuclei_command = self.config.get("nuclei_command", "nuclei")
+        self._page_context_cache: dict[str, EndpointContext] = {}
 
     @property
     def name(self) -> str:
@@ -180,8 +182,7 @@ class NucleiAdapter(BaseAdapter):
                 cmd, timeout=timeout
             )
 
-            # Parse results
-            findings = []
+            parsed_results: list[dict[str, Any]] = []
             
             try:
                 with open(report_path, 'r') as f:
@@ -189,14 +190,22 @@ class NucleiAdapter(BaseAdapter):
                         if line.strip():
                             try:
                                 result = json.loads(line)
-                                finding = self._parse_nuclei_result(result, target_url)
-                                if finding:
-                                    findings.append(finding)
+                                parsed_results.append(result)
                             except json.JSONDecodeError:
                                 logger.debug(f"Could not parse line: {line[:100]}")
                                 continue
             except FileNotFoundError:
                 logger.warning(f"Nuclei report file not found: {report_path}")
+
+            self._page_context_cache = await analyze_urls(
+                [target_url] + [result.get("matched-at", target_url) for result in parsed_results]
+            )
+
+            findings = []
+            for result in parsed_results:
+                finding = self._parse_nuclei_result(result, target_url)
+                if finding:
+                    findings.append(finding)
 
             # Clean up temp file
             try:
@@ -292,12 +301,10 @@ class NucleiAdapter(BaseAdapter):
             if not remediation:
                 remediation = f"Review and fix the vulnerability identified by template: {template_id}"
 
-            # XSS: upgrade severity + add PoC
+            # XSS: keep scanner severity, add PoC, then let context floors apply later.
             xss_poc = ""
             xss_impact = None
             if is_xss:
-                if finding_severity < FindingSeverity.HIGH:
-                    finding_severity = FindingSeverity.HIGH
                 # Generate concrete PoC payload
                 param = ""
                 if "?" in matched_at and "=" in matched_at:
@@ -335,6 +342,9 @@ class NucleiAdapter(BaseAdapter):
                 recommendation=remediation,
                 references=references,
             )
+
+            context = self._page_context_cache.get(matched_at) or self._page_context_cache.get(target_url)
+            finding = apply_context_to_finding(finding, context)
 
             return finding
 

@@ -175,7 +175,9 @@ const ScansTable = ({ scans, showActions = true, onDelete = null }) => {
             {showActions && (
               <td style={{ padding: '16px', display: 'flex', gap: '12px', alignItems: 'center' }}>
                 {scan.status === 'completed' && (
-                  <a href={`/api/scans/${scan.scan_id}/report.html?lang=${language}`} target="_blank" style={{ color: 'var(--color-primary)', fontSize: '0.875rem' }}>{t('viewReport')}</a>
+                  <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                    <a href={`/api/scans/${scan.scan_id}/report.html?lang=${language}`} target="_blank" style={{ color: 'var(--color-primary)', fontSize: '0.875rem' }}>{t('viewReport')}</a>
+                  </div>
                 )}
                 {onDelete && (
                   <button

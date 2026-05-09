@@ -114,6 +114,20 @@ def calculate_risk_score(finding: Finding) -> float:
             (finding.impact or "").lower(),
         ]
     )
+    evidence_text = (finding.evidence.snippet or "").lower()
+    title_lower = finding.title.lower()
+
+    # Explicit GDPR/legal priority rules so common privacy findings do not collapse
+    # to the same score band regardless of legal importance.
+    if finding.category == FindingCategory.PRIVACY:
+        if "privacy policy not found" in title_lower:
+            score = max(score, 70.0)
+        elif "manglende brukerrettigheter" in title_lower or "missing controls" in evidence_text:
+            score = max(score, 40.0)
+        elif "privacy contact information missing" in title_lower:
+            score = max(score, 40.0)
+        elif "terms and conditions not found" in title_lower:
+            score = min(max(score, 20.0), 29.0)
 
     # --- Score adjustments for known low-value findings ---
 
@@ -128,18 +142,41 @@ def calculate_risk_score(finding: Finding) -> float:
         kw in text_to_check
         for kw in ("clickjacking", "x-frame-options", "frame-ancestors", "x-frame")
     )
+    is_csp_missing = "content security policy" in text_to_check and "header not set" in text_to_check
     if is_clickjacking:
-        has_sensitive_context = any(
+        has_protected_context = any(
             kw in text_to_check
-            for kw in ("login", "auth", "account", "payment", "checkout", "admin", "password")
+            for kw in ("admin", "dashboard", "settings", "account", "users", "editor", "login")
         )
-        if not has_sensitive_context:
-            return min(score, 25.0)  # No sensitive data – cap at LOW range
-        # Sensitive page: cap at MEDIUM ceiling
-        return min(score, 50.0)
+        has_form_context = any(
+            kw in text_to_check
+            for kw in (
+                "observed methods post",
+                "observed methods put",
+                "observed methods patch",
+                "observed methods delete",
+                "password",
+                "inputs",
+                "tamper with fields",
+            )
+        )
+        if is_csp_missing:
+            if has_protected_context:
+                return min(max(score, 40.0), 60.0)
+            return min(score, 25.0)
+        if has_form_context:
+            return min(max(score, 40.0), 60.0)
+        return min(score, 25.0)
 
-    # XSS boost: if HIGH confidence and has PoC/innerHTML evidence, push toward 90
+    # XSS scoring is only boosted by explicit, documented context.
+    # We do not downgrade scanner severity, and admin/authenticated surfaces keep a higher floor.
     is_xss = any(kw in text_to_check for kw in ("cross-site scripting", "xss", "script injection"))
+    if is_xss:
+        if any(kw in text_to_check for kw in ("admin", "login", "signin", "auth")):
+            score = max(score, 70.0)
+        else:
+            score = max(score, 40.0)
+
     if is_xss and finding.confidence == FindingConfidence.HIGH:
         has_concrete_evidence = any(
             kw in text_to_check
@@ -147,6 +184,28 @@ def calculate_risk_score(finding: Finding) -> float:
         )
         if has_concrete_evidence:
             score = max(score, 85.0)
+
+        if any(kw in text_to_check for kw in ("admin", "dashboard", "settings", "user management")):
+            score = max(score, 92.0)
+        elif any(kw in text_to_check for kw in ("login", "signin", "password", "session")):
+            score = max(score, 88.0)
+        elif any(
+            kw in text_to_check
+            for kw in ("post", "put", "patch", "delete", "create", "update", "edit", "save")
+        ):
+            score = max(score, 90.0)
+
+    is_auth_exposure = any(
+        kw in text_to_check
+        for kw in (
+            "without authentication",
+            "admin interface accessible",
+            "authenticated surface accessible",
+            "broken access control",
+        )
+    )
+    if is_auth_exposure:
+        score = max(score, 95.0)
 
     # --- Standard pattern boosts ---
 
@@ -169,6 +228,9 @@ def calculate_risk_score(finding: Finding) -> float:
         path_lower = finding.evidence.file_path.lower()
         if any(p in path_lower for p in ["public", "static", "frontend", "client", "dist"]):
             score *= 1.25
+
+    if finding.severity == FindingSeverity.INFO:
+        score = min(score, 10.0)
 
     # Cap at 100
     return min(score, 100.0)

@@ -6,6 +6,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from packages.adapters.base import BaseAdapter
+from packages.adapters.gdpr import GdprAdapter
 from packages.adapters.gitleaks import GitleaksAdapter
 from packages.adapters.osv import OsvScannerAdapter
 from packages.adapters.semgrep import SemgrepAdapter
@@ -37,6 +38,7 @@ class AdapterRegistry:
         NucleiAdapter,
         SyftAdapter,
         ZapAdapter,
+        GdprAdapter,
     ]
 
     def __init__(self, config: dict[str, Any] | None = None):

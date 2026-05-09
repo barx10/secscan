@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -9,6 +10,12 @@ from typing import Any
 from urllib.parse import urlparse
 
 from packages.adapters.base import AdapterResult, BaseAdapter
+from packages.adapters.web_context import (
+    EndpointContext,
+    analyze_urls,
+    apply_context_to_finding,
+    build_auth_exposure_findings,
+)
 from packages.core.models import (
     Evidence,
     Finding,
@@ -27,8 +34,6 @@ FALSE_POSITIVE_ALERTS = {
     "timestamp disclosure - unix": None,  # None = remove entirely
     # Cache retrieved = purely informational, not a vulnerability
     "retrieved from cache": None,
-    # Generic "suspicious" SQL-word comments in source that are not injections
-    "suspicious comments": None,
 }
 
 # Cache-control only relevant if page handles authenticated/sensitive data
@@ -46,6 +51,26 @@ SENSITIVE_PAGE_INDICATORS = [
     "login", "signin", "auth", "account", "profile", "password",
     "checkout", "payment", "admin", "dashboard", "settings",
 ]
+
+PROTECTED_CSP_PATHS = ("/admin", "/dashboard", "/settings", "/account", "/users", "/editor", "/login")
+
+STATIC_ASSET_EXTENSIONS = (
+    ".js",
+    ".css",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".otf",
+    ".eot",
+    ".svg",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+)
+
+API_PATH_HINTS = ("/api", "/graphql", "/v1/", "/v2/")
 
 # ZAP risk levels mapping
 ZAP_RISK_MAP = {
@@ -95,6 +120,7 @@ class ZapAdapter(BaseAdapter):
         super().__init__(config)
         # Alternative: use zap-cli or zap.sh
         self.zap_command = config.get("zap_command", "zap-baseline.py") if config else "zap-baseline.py"
+        self._page_context_cache: dict[str, EndpointContext] = {}
 
     def is_available(self) -> bool:
         """Check if ZAP is available."""
@@ -263,6 +289,8 @@ class ZapAdapter(BaseAdapter):
                 logger.warning(f"Could not read ZAP report: {e}")
                 raw_output = {}
 
+            self._page_context_cache = await analyze_urls(self._collect_urls(raw_output, target_url))
+
             # Clean up temp file
             try:
                 Path(report_path).unlink()
@@ -298,6 +326,7 @@ class ZapAdapter(BaseAdapter):
         """Parse ZAP JSON output into findings."""
         findings = []
         target_url = ""
+        raw_xss_alerts = 0
 
         site = raw_output.get("site", [])
         if isinstance(site, list):
@@ -305,6 +334,9 @@ class ZapAdapter(BaseAdapter):
                 target_url = s.get("@name", "")
                 alerts = s.get("alerts", [])
                 for alert in alerts:
+                    alert_name = alert.get("name", "")
+                    if self._is_xss_alert_name(alert_name):
+                        raw_xss_alerts += 1
                     try:
                         finding = self._parse_alert(alert, target_url)
                         if finding:
@@ -316,6 +348,9 @@ class ZapAdapter(BaseAdapter):
             target_url = site.get("@name", "")
             alerts = site.get("alerts", [])
             for alert in alerts:
+                alert_name = alert.get("name", "")
+                if self._is_xss_alert_name(alert_name):
+                    raw_xss_alerts += 1
                 try:
                     finding = self._parse_alert(alert, target_url)
                     if finding:
@@ -327,16 +362,54 @@ class ZapAdapter(BaseAdapter):
         # Add auth/storage checks based on the target URL
         auth_findings = self._check_auth_storage(target_url, raw_output)
         findings.extend(auth_findings)
+        findings.extend(build_auth_exposure_findings(self._page_context_cache.values(), self.name))
+
+        parsed_xss_findings = sum(1 for finding in findings if self._is_xss_alert_name(finding.title))
+        if raw_xss_alerts and parsed_xss_findings == 0:
+            logger.error("ZAP reported %s XSS alert(s), but none were emitted as findings", raw_xss_alerts)
 
         return findings
+
+    def _collect_urls(self, raw_output: dict[str, Any], target_url: str) -> list[str]:
+        """Collect endpoint URLs to analyze separately."""
+        urls = [target_url]
+        site = raw_output.get("site", [])
+        sites = site if isinstance(site, list) else [site]
+        for site_entry in sites:
+            if not isinstance(site_entry, dict):
+                continue
+            if site_entry.get("@name"):
+                urls.append(site_entry["@name"])
+            for alert in site_entry.get("alerts", []):
+                for instance in alert.get("instances", [])[:10]:
+                    uri = instance.get("uri", "")
+                    if uri:
+                        urls.append(uri)
+        return urls
 
     def _should_suppress(self, alert_name: str, alert: dict[str, Any]) -> bool:
         """Return True if this alert is a known false-positive and should be dropped."""
         name_lower = alert_name.lower()
 
+        if self._is_xss_alert_name(alert_name):
+            return False
+
         # Exact suppression list
         for pattern, action in FALSE_POSITIVE_ALERTS.items():
             if pattern in name_lower:
+                return True
+
+        if "suspicious comments" in name_lower:
+            evidence_blob = " ".join(
+                filter(
+                    None,
+                    [
+                        alert.get("otherinfo", ""),
+                        *(instance.get("evidence", "") for instance in alert.get("instances", [])),
+                    ],
+                )
+            ).lower()
+            if "select" in evidence_blob or "from" in evidence_blob:
                 return True
 
         # Cache-control: only flag if it's related to authenticated/sensitive resources
@@ -350,28 +423,93 @@ class ZapAdapter(BaseAdapter):
 
         return False
 
-    def _adjust_clickjacking(self, alert_name: str, finding: Finding, target_url: str) -> Finding | None:
-        """Downgrade or suppress clickjacking alerts if page is not sensitive."""
+    def _adjust_clickjacking(
+        self,
+        alert_name: str,
+        finding: Finding,
+        context: EndpointContext | None,
+    ) -> Finding | None:
+        """Apply explicit CSP and clickjacking severity rules with traceable logging."""
         name_lower = alert_name.lower()
         if not any(cj in name_lower for cj in CLICKJACKING_ALERTS):
             return finding  # Not a clickjacking alert
 
-        url_lower = target_url.lower()
-        if any(s in url_lower for s in SENSITIVE_PAGE_INDICATORS):
-            # Real risk – keep as MEDIUM
-            finding.severity = FindingSeverity.MEDIUM
+        context_url = (context.url if context else (finding.evidence.file_path or "")).lower()
+        has_protected_path = any(path in context_url for path in PROTECTED_CSP_PATHS)
+        has_form_context = bool(context and (context.input_names or "password" in context.input_types or context.methods))
+        is_csp_alert = "content security policy" in name_lower or "csp" in name_lower
+
+        if is_csp_alert:
+            if has_protected_path and finding.severity in (FindingSeverity.INFO, FindingSeverity.LOW):
+                finding.severity = FindingSeverity.MEDIUM
+                logger.info("CSP severity floor applied by protected-path rule for %s", context_url or alert_name)
+                finding.description += (
+                    "\n\nNote: Raised to MEDIUM because the route matches a protected path rule "
+                    "(/admin, /dashboard, /settings, /account, /users, /editor, /login)."
+                )
+                return finding
+
+            finding.severity = FindingSeverity.LOW
+            finding.confidence = FindingConfidence.LOW
+            logger.info("CSP downgraded to LOW by non-protected-path rule for %s", context_url or alert_name)
             finding.description += (
-                "\n\nNote: This page appears to handle sensitive data (auth/account/payment), "
-                "making clickjacking a real risk."
+                "\n\nNote: Downgraded to LOW by CSP path rule because the route did not match a protected surface."
             )
             return finding
 
-        # Not a sensitive page – downgrade to LOW
+        if has_form_context:
+            finding.severity = FindingSeverity.MEDIUM
+            logger.info("Clickjacking kept at MEDIUM due to observed form context for %s", context_url or alert_name)
+            finding.description += (
+                "\n\nNote: Kept at MEDIUM because the page exposes form inputs or request methods that can trigger user actions."
+            )
+            return finding
+
+        finding.severity = FindingSeverity.LOW
+        finding.confidence = FindingConfidence.LOW
+        logger.info("Clickjacking downgraded to LOW due to static-page rule for %s", context_url or alert_name)
+        finding.description += (
+            "\n\nNote: Downgraded to LOW by static-page rule because no form inputs or state-changing methods were observed."
+        )
+        return finding
+
+    def _is_xss_alert_name(self, alert_name: str) -> bool:
+        alert_lower = alert_name.lower()
+        return "xss" in alert_lower or "cross site scripting" in alert_lower
+
+    def _adjust_cors_wildcard(
+        self,
+        alert_name: str,
+        finding: Finding,
+        context: EndpointContext | None,
+    ) -> Finding:
+        name_lower = alert_name.lower()
+        if not any(token in name_lower for token in ("cors", "cross domain", "cross-domain", "access-control-allow-origin")):
+            return finding
+
+        context_url = (context.url if context else (finding.evidence.file_path or "")).lower()
+        is_static_asset = any(context_url.endswith(extension) for extension in STATIC_ASSET_EXTENSIONS)
+        is_api_endpoint = any(hint in context_url for hint in API_PATH_HINTS)
+        has_authenticated_context = bool(
+            context and (context.login_surface or context.auth_wall_detected or context.sensitive_surface)
+        )
+
+        if is_static_asset:
+            finding.severity = FindingSeverity.INFO
+            finding.confidence = FindingConfidence.LOW
+            finding.description += (
+                "\n\nNote: Downgraded to INFO because the wildcard CORS exposure appears limited to a static asset."
+            )
+            return finding
+
+        if is_api_endpoint and has_authenticated_context:
+            finding.severity = FindingSeverity.MEDIUM
+            return finding
+
         finding.severity = FindingSeverity.LOW
         finding.confidence = FindingConfidence.LOW
         finding.description += (
-            "\n\nNote: Downgraded to LOW – page does not appear to handle sensitive data. "
-            "Clickjacking is only a real risk on login, payment, or account pages."
+            "\n\nNote: Downgraded to LOW because the wildcard CORS exposure was not tied to an authenticated API surface."
         )
         return finding
 
@@ -497,9 +635,11 @@ class ZapAdapter(BaseAdapter):
         impact = self._get_impact(alert_name, severity)
 
         # Build attack scenario
-        attack_scenario = self._get_attack_scenario(alert_name, instances)
+        attack_scenario = self._get_attack_scenario(alert_name, alert, instances)
 
-        return Finding(
+        context = self._page_context_cache.get(urls[0] if urls else site_name)
+
+        finding = Finding(
             title=alert_name,
             severity=severity,
             category=FindingCategory.WEB,
@@ -514,8 +654,9 @@ class ZapAdapter(BaseAdapter):
             cwe_id=f"CWE-{cwe_id}" if cwe_id else None,
         )
 
-        # Apply clickjacking risk adjustment
-        finding = self._adjust_clickjacking(alert_name, finding, site_name)
+        finding = apply_context_to_finding(finding, context)
+        finding = self._adjust_clickjacking(alert_name, finding, context)
+        finding = self._adjust_cors_wildcard(alert_name, finding, context)
 
         return finding
 
@@ -546,9 +687,21 @@ class ZapAdapter(BaseAdapter):
 
         return f"This {severity.value} severity issue could impact the security of the application and its users."
 
-    def _get_attack_scenario(self, alert_name: str, instances: list) -> str:
-        """Generate attack scenario based on alert type."""
+    def _get_attack_scenario(self, alert_name: str, alert: dict[str, Any], instances: list) -> str:
+        """Generate attack scenario, preferring concrete ZAP data when available."""
         alert_lower = alert_name.lower()
+
+        for instance in instances:
+            attack = (instance.get("attack", "") or "").strip()
+            evidence = (instance.get("evidence", "") or "").strip()
+            if attack:
+                return f"ZAP observed attack payload: {attack}"
+            if evidence and len(evidence) > 20:
+                return f"ZAP observed concrete evidence on the response path: {evidence[:220]}"
+
+        other_info = self._clean_html(alert.get("otherinfo", ""))
+        if other_info:
+            return other_info
 
         if "sql injection" in alert_lower:
             return (

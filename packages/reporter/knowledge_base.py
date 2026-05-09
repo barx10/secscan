@@ -1,20 +1,47 @@
 """Security knowledge base for user-friendly explanations."""
 
-from typing import Dict, Any
+from __future__ import annotations
+
+import logging
+import re
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+SECRET_EVIDENCE_PATTERNS = (
+    re.compile(r"\bapi[_-]?key\b", re.IGNORECASE),
+    re.compile(r"\b(?:client[_-]?secret|secret)\b", re.IGNORECASE),
+    re.compile(r"\bpassword\b", re.IGNORECASE),
+    re.compile(r"\btoken\b", re.IGNORECASE),
+    re.compile(r"\bbearer\s+[A-Za-z0-9._-]+", re.IGNORECASE),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bsk_(?:live|test)_[A-Za-z0-9]+\b"),
+)
 
 class KnowledgeBase:
     """Knowledge base for security findings."""
 
     @staticmethod
-    def get_content(finding: Any, lang: str = "en") -> Dict[str, str]:
+    def get_content(finding: Any, lang: str = "en") -> dict[str, str]:
         """Get user-friendly content for a finding."""
         # Normalize language
         lang = lang.lower() if lang else "en"
-        
+
         # Detect topic based on finding data
         topic = KnowledgeBase._detect_topic(finding)
-        
+
         if not topic or topic not in TOPICS:
+            return {}
+
+        if not KnowledgeBase._topic_matches_finding(finding, topic):
+            evidence = KnowledgeBase._evidence_text(finding)[:120]
+            logger.error(
+                "Knowledge-base topic mismatch for finding '%s': topic=%s evidence=%r",
+                getattr(finding, "title", "<unknown>"),
+                topic,
+                evidence,
+            )
             return {}
 
         content = TOPICS[topic].get(lang, TOPICS[topic]["en"])
@@ -23,13 +50,16 @@ class KnowledgeBase:
     @staticmethod
     def _detect_topic(finding: Any) -> str | None:
         """Detect the security topic from finding details."""
-        text = (f"{finding.title} {finding.description}").lower()
-        
+        text = KnowledgeBase._finding_text(finding)
+        evidence_text = KnowledgeBase._evidence_text(finding)
+
+        if "missing controls" in evidence_text:
+            return "privacy_rights"
         if "sql" in text and "injection" in text:
             return "sql_injection"
         if "xss" in text or "cross-site scripting" in text or "cross site scripting" in text:
             return "xss"
-        if "secret" in text or "credential" in text or "password" in text or "key" in text or "token" in text:
+        if KnowledgeBase._has_secret_evidence(finding):
             return "secrets"
         if "command" in text and "injection" in text:
             return "command_injection"
@@ -37,10 +67,39 @@ class KnowledgeBase:
             # Check if it's a dependency issue
             if finding.evidence and finding.evidence.tool == "trivy" and "npm" in str(finding.evidence.raw_output):
                 return "dependency"
-            if finding.category == "dependencies":
+            category_value = getattr(finding.category, "value", str(finding.category)).lower()
+            if category_value in {"deps", "dependencies"}:
                 return "dependency"
-                
+
         return None
+
+    @staticmethod
+    def _finding_text(finding: Any) -> str:
+        return (
+            f"{getattr(finding, 'title', '')} "
+            f"{getattr(finding, 'description', '')} "
+            f"{getattr(finding, 'impact', '')}"
+        ).lower()
+
+    @staticmethod
+    def _evidence_text(finding: Any) -> str:
+        evidence = getattr(finding, "evidence", None)
+        snippet = getattr(evidence, "snippet", "") or ""
+        raw_output = getattr(evidence, "raw_output", None)
+        return f"{snippet} {raw_output or ''}".lower()
+
+    @staticmethod
+    def _has_secret_evidence(finding: Any) -> bool:
+        combined_text = f"{KnowledgeBase._finding_text(finding)} {KnowledgeBase._evidence_text(finding)}"
+        return any(pattern.search(combined_text) for pattern in SECRET_EVIDENCE_PATTERNS)
+
+    @staticmethod
+    def _topic_matches_finding(finding: Any, topic: str) -> bool:
+        if topic == "secrets":
+            return KnowledgeBase._has_secret_evidence(finding)
+        if topic == "privacy_rights":
+            return "missing controls" in KnowledgeBase._evidence_text(finding)
+        return True
 
 TOPICS = {
     "sql_injection": {
@@ -114,6 +173,30 @@ TOPICS = {
             ),
             "attack_scenario": "1. Angriper finner `API_KEY=12345` i koden din på GitHub.\n2. Angriperen bruker nøkkelen til å hente ut alle kundedataene dine.\n3. Angriperen selger dataene på det mørke nettet."
         }
+    },
+    "privacy_rights": {
+        "en": {
+            "title": "Missing User Rights Controls (GDPR Art. 17/20)",
+            "description": "The application appears to be missing visible self-service controls for deletion, data export, or privacy preferences.",
+            "impact": "MEDIUM: Users may be unable to exercise GDPR rights for erasure, access, or control of personalization without contacting support.",
+            "recommendation": (
+                "1. Add account controls for deleting the account and exporting personal data.\n"
+                "2. Expose privacy or personalization settings in an obvious location.\n"
+                "3. Document how users can exercise Articles 17 and 20 if a self-service flow is not possible."
+            ),
+            "attack_scenario": "An auditor or user checks the account area and cannot find deletion, export, or privacy preference controls, indicating incomplete GDPR rights support."
+        },
+        "no": {
+            "title": "Manglende brukerrettigheter (GDPR Art. 17/20)",
+            "description": "Applikasjonen ser ut til å mangle synlige selvbetjente valg for sletting, dataeksport eller personverninnstillinger.",
+            "impact": "MEDIUM: Brukere kan få problemer med å utøve retten til sletting, innsyn eller kontroll over personalisering uten manuell oppfølging.",
+            "recommendation": (
+                "1. Legg til kontroller for å slette konto og eksportere personopplysninger.\n"
+                "2. Gjør personvern- eller personaliseringsinnstillinger enkle å finne.\n"
+                "3. Dokumenter hvordan brukere kan utøve rettighetene etter artikkel 17 og 20 hvis selvbetjening ikke er mulig."
+            ),
+            "attack_scenario": "En bruker eller revisor ser gjennom kontoområdet og finner ikke valg for sletting, eksport eller personvernpreferanser, noe som tyder på mangelfull støtte for GDPR-rettigheter."
+        },
     },
     "dependency": {
         "en": {
